@@ -1,0 +1,48 @@
+# Virtual environments
+venv/
+env/
+.venv/
+__pycache__/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.project
+.pydevproject
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Config files (may contain sensitive data)
+.papi-q/config.json
+isilon_admin_audit.csv
+*.csv
+
+# Development artifacts
+dist/
+build/
+*.egg-info/
+*.pyc
+.pytest_cache/
+
+# Documentation (not needed on workstations)
+PLAN.md
+AGENTS.md
+docs/API.md
+docs/QUICKSTART.md
+src/docs/
+
+# Development-only scripts
+setup.sh
+.github/
+
+# Testing
+.pytest_cache/
+coverage/
+htmlcov/

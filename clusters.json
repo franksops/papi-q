@@ -1,0 +1,5 @@
+{
+  "cluster_prod": "https://cluster-prod.fqdn.local:8080",
+  "cluster_dr": "https://cluster-dr.fqdn.local:8080",
+  "cluster_archive": "https://cluster-archive.fqdn.local:8080"
+}

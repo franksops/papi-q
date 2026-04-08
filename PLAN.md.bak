@@ -1,0 +1,72 @@
+## Project Overview
+Development of a portable Python-based management tool using Streamlit to monitor and modify SmartQuotas across three Dell PowerScale (Isilon) clusters running OneFS 9.12. The tool will run locally on macOS or RHEL, utilizing the official Isilon SDK to provide real-time data and audit logging.
+
+---
+
+## Required Packages
+The following Python packages must be installed in a virtual environment:
+* isilon-sdk==0.7.0 (Official SDK for OneFS 9.12 PAPI interaction)
+* streamlit (Web framework for the user interface)
+* pandas (Data manipulation for quota tables and CSV logging)
+* urllib3 (Handling SSL/TLS for cluster management IPs)
+* python-dotenv (Optional: Managing local session configurations)
+
+---
+
+## System Architecture
+* Frontend: Streamlit-based web interface accessed via localhost:8501.
+* Backend: Direct HTTPS communication with OneFS Platform API (PAPI) on port 8080.
+* Authentication: User-provided Active Directory or local cluster credentials per session.
+* Data Persistence: Local JSON for cluster inventory; Local CSV for action logging.
+
+---
+
+## Configuration Files
+
+### clusters.json
+{
+  "Production": "10.10.1.50",
+  "DR_Cluster": "10.10.2.50",
+  "Archive": "10.10.3.50"
+}
+
+### requirements.txt
+isilon-sdk==0.7.0
+streamlit
+pandas
+urllib3
+
+---
+
+## Core Functionality
+
+### Connection Management
+* Dropdown menu to select target cluster from clusters.json.
+* Sidebar inputs for username and password credentials.
+* Session-based authentication (st.session_state) to maintain API client connectivity.
+* Exception handling for ApiException (Invalid credentials) or MaxRetryError (Network).
+
+### Quota Monitoring
+* Real-time retrieval of quota metadata via isi_sdk.v9_12_0.QuotaApi.
+* Implementation of "resume" tokens to paginate through thousands of shares/quotas.
+* Calculation of usage percentages: (Usage Logical / Threshold Hard).
+* Visual status indicators: Green (<80%), Yellow (80-95%), Red (>95%).
+
+### Quota Modification
+* Search/Filter interface to isolate specific directory paths or users.
+* Input fields to modify hard and soft thresholds in GB/TB.
+* Required confirmation checkbox before executing PUT requests.
+* Automated byte conversion (e.g., 1 TB to 1099511627776 bytes) for API compatibility.
+
+### Audit Logging
+* Automated append-only CSV logging (isilon_admin_audit.csv) for all PUT attempts.
+* Logged fields: Timestamp, Admin, Cluster, Action, Path, Old_Limit, New_Limit.
+* Integrated "View History" pane in the UI to display the most recent local changes.
+
+---
+
+## Security and Compliance
+* RBAC: Actions are strictly limited by the permissions of the logged-in user's cluster account.
+* SSL: configuration.verify_ssl = False for internal management; optional CA cert path.
+* Audit Trail: Local CSV file serves as a tamper-evident record for change management.
+* Zero Persistence: Admin credentials remain in volatile memory and are never saved to disk.
