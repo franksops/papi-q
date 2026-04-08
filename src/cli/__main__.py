@@ -46,7 +46,7 @@ def main() -> int:
     args = parse_args()
     
     if args.clusters:
-        from config import load_clusters
+        from src.config import load_clusters
         clusters = load_clusters()
         if not clusters:
             print("No clusters configured. Edit ~/.papi-q/clusters.json")
@@ -57,7 +57,7 @@ def main() -> int:
         return 0
     
     if args.add_cluster:
-        from config import add_cluster, save_clusters, load_clusters
+        from src.config import add_cluster, save_clusters, load_clusters
         name = input("Enter cluster name (short, memorable): ").strip()
         url = input("Enter cluster API URL (e.g., https://cluster.fqdn:8080): ").strip()
         
@@ -76,7 +76,7 @@ def main() -> int:
     
     if args.command == "run":
         import subprocess
-        subprocess.run([sys.executable, "-m", "streamlit", "run", "main.py"])
+        subprocess.run([sys.executable, "-m", "streamlit", "run", "src/main.py"])
         return 0
     
     return 1

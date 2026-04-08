@@ -1,8 +1,9 @@
 """UI component functions for SmartQuota Manager."""
 
 import streamlit as st
-from api import QuotaEntry, Status
-from config import DEFAULT_CLUSTERS_FILE
+
+from src.api import QuotaEntry, Status
+from src.config import DEFAULT_CLUSTERS_FILE
 import pandas as pd
 from typing import List, Dict, Any
 

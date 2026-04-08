@@ -3,13 +3,13 @@
 import streamlit as st
 from streamlit import session_state as state
 
-# Import our modules
-from config import load_config, load_clusters, save_clusters, add_cluster, remove_cluster
-from api import IsilonAPI, QuotaEntry
-from audit import write_audit_entry
-from utils import filter_quotas, get_top_offenders, paginate_list
-from ui.components import create_modification_form, status_badge, color_for_status
-from ui.session import init_session, set_api_client, clear_api_client
+# Import our modules (using relative imports for package structure)
+from src.config import load_config, load_clusters, save_clusters, add_cluster, remove_cluster
+from src.api import IsilonAPI, QuotaEntry, Status
+from src.audit import write_audit_entry
+from src.utils import filter_quotas, get_top_offenders, paginate_list
+from src.ui.components import create_modification_form, status_badge, color_for_status
+from src.ui.session import init_session, set_api_client, clear_api_client
 import pandas as pd
 
 # Set page config with custom title and icon
@@ -132,6 +132,11 @@ def login_section():
                 verify_ssl=not ssl_warning,
             )
             set_api_client(api)
+            
+            # Store additional session state
+            state.selected_cluster = selected_cluster
+            state.admin_user = username
+            
             st.success(f"✅ Connected to {selected_cluster}")
             st.rerun()
         except Exception as e:
@@ -142,6 +147,9 @@ def logout_button():
     """Logout button - only show if client is active."""
     if state.api_client:
         st.sidebar.header(f"Connected: {state.selected_cluster}")
+        if st.sidebar.button("🚪 Logout", use_container_width=True):
+            clear_api_client()
+            st.rerun()
         if st.sidebar.button("🚪 Logout", use_container_width=True):
             clear_api_client()
             st.rerun()
@@ -414,7 +422,9 @@ def audit_tab():
 # Main layout
 def main():
     """Main layout function."""
-    st.sidebar.image("https://logo_clear.png", width=50)  # Placeholder logo
+    # Load logo placeholder (will be replaced with actual logo if available)
+    logo_path = "https://logo_clear.png"
+    st.sidebar.image(logo_path, width=50)  # Placeholder logo
     
     # Sidebar content
     if state.api_client:

@@ -4,7 +4,8 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from config import DEFAULT_AUDIT_LOG, load_config
+
+from src.config import DEFAULT_AUDIT_LOG, load_config
 
 
 AUDIT_FIELDS = [
