@@ -41,10 +41,14 @@ The tool creates a `~/.papi-q/` directory on first run with:
 ## Usage
 
 ```bash
+# Default (binds to 127.0.0.1 for security)
 streamlit run src/main.py
+
+# On dev machine (binds to specific IP for lan access)
+streamlit run src/main.py --server.address 192.168.1.10
 ```
 
-Then open http://localhost:8501 in your browser.
+Then open the URL shown in your browser.
 
 ## Workflow
 
