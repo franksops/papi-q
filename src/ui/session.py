@@ -53,6 +53,20 @@ def clear_api_client() -> None:
     st.session_state.selected_quotas = []
 
 
+def handle_api_error(error: Exception) -> bool:
+    """
+    Handle API errors, specifically 401 Unauthorized.
+    Returns True if session was cleared.
+    """
+    error_str = str(error).lower()
+    if "401" in error_str or "unauthorized" in error_str or "invalid credentials" in error_str:
+        clear_api_client()
+        st.error("🔒 Session expired or unauthorized. Please login again.")
+        st.rerun()
+        return True
+    return False
+
+
 def get_selected_quotas() -> list:
     """Get currently selected quotas."""
     return st.session_state.selected_quotas

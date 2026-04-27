@@ -105,9 +105,19 @@ class IsilonAPI:
         self.verify_ssl = verify_ssl
         self.max_retries = max_retries
         
-        # ImportOneFS SDK here to handle missing dependency gracefully
+        # Import OneFS SDK here to handle missing dependency gracefully
         try:
             import isi_sdk
+            # We specifically target v9_12_0 models if available, but fallback to base if not
+            try:
+                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+                self._sdk_models_version = "v9_12_0"
+            except ImportError:
+                # Fallback to standard models if version-specific ones aren't found
+                from isi_sdk.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from isi_sdk.models.quota_limits import QuotaLimits
+                self._sdk_models_version = "default"
         except ImportError:
             raise ImportError(
                 "isilon-sdk not installed. Run: pip install isilon-sdk"
@@ -125,6 +135,35 @@ class IsilonAPI:
         self.quota_api = isi_sdk.QuotaApi(isi_sdk.ApiClient(self.configuration))
         self.shares_api = isi_sdk.SharesApi(isi_sdk.ApiClient(self.configuration))
         self.namespaces_api = isi_sdk.NamespaceApi(isi_sdk.ApiClient(self.configuration))
+        self.protocols_api = isi_sdk.ProtocolsApi(isi_sdk.ApiClient(self.configuration))
+        self.snapshot_api = isi_sdk.SnapshotApi(isi_sdk.ApiClient(self.configuration))
+    
+    def get_protocol_mapping(self, access_zone: str = "system") -> Dict[str, str]:
+        """
+        Get a mapping of paths to protocols (SMB/NFS).
+        
+        Returns:
+            Dictionary mapping path -> protocol string (e.g. "SMB", "NFS", "SMB, NFS")
+        """
+        mapping = {}
+        try:
+            # Get SMB shares
+            smb_response = self.shares_api.list_smb_shares(zone=access_zone)
+            for share in smb_response.shares:
+                path = share.path
+                mapping[path] = "SMB"
+            
+            # Get NFS exports
+            nfs_response = self.protocols_api.list_nfs_exports(zone=access_zone)
+            for export in nfs_response.exports:
+                for path in export.paths:
+                    if path in mapping:
+                        mapping[path] += ", NFS"
+                    else:
+                        mapping[path] = "NFS"
+        except Exception:
+            pass # Gracefully handle if some protocols aren't licensed/accessible
+        return mapping
     
     def get_quota_for_path(self, path: str, access_zone: str = "system") -> Optional[QuotaEntry]:
         """
@@ -239,6 +278,40 @@ class IsilonAPI:
         except Exception as e:
             raise RuntimeError(f"Failed to list quotas: {e}")
     
+    def list_all_quotas(
+        self,
+        path: Optional[str] = None,
+        access_zone: Optional[str] = None,
+        max_entries: int = 5000,
+    ) -> List[QuotaEntry]:
+        """
+        List all quotas by automatically following continue tokens.
+        
+        Args:
+            path: Filter by path prefix
+            access_zone: Filter by access zone
+            max_entries: Safety cap for total entries
+        
+        Returns:
+            List of all QuotaEntry objects
+        """
+        all_quotas = []
+        continue_token = None
+        
+        while len(all_quotas) < max_entries:
+            quotas, continue_token = self.list_quotas(
+                path=path,
+                access_zone=access_zone,
+                limit=1000,
+                continue_token=continue_token
+            )
+            all_quotas.extend(quotas)
+            
+            if not continue_token:
+                break
+        
+        return all_quotas
+    
     def get_share_path(self, share_name: str, access_zone: str = "system") -> Optional[str]:
         """
         Get the filesystem path for a share.
@@ -281,17 +354,24 @@ class IsilonAPI:
             Updated QuotaEntry
         """
         try:
-            # Import SDK types
+            # We use the models imported or defined during __init__
             import isi_sdk
-            from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
-            from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+            
+            # Use appropriate model based on version
+            if self._sdk_models_version == "v9_12_0":
+                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+            else:
+                from isi_sdk.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from isi_sdk.models.quota_limits import QuotaLimits
             
             # Build limits object
             limits = QuotaLimits()
             if hard_limit_gb is not None:
-                limits.hard = int(hard_limit_gb * (1024 ** 3))
+                # Ensure integer bytes for PAPI compatibility
+                limits.hard = int(round(hard_limit_gb * (1024 ** 3)))
             if soft_limit_gb is not None:
-                limits.soft = int(soft_limit_gb * (1024 ** 3))
+                limits.soft = int(round(soft_limit_gb * (1024 ** 3)))
             
             # Build quota entry
             quota = SDKQuotaEntry(limits=limits)
@@ -317,6 +397,89 @@ class IsilonAPI:
         except Exception as e:
             raise RuntimeError(f"Failed to update quota {quota_id}: {e}")
     
+    def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
+        """Get the full raw dictionary representation of a quota."""
+        try:
+            response = self.quota_api.get_raw_quota_entry(quota_id)
+            # The SDK might return a model, convert to dict
+            if hasattr(response, "to_dict"):
+                return response.to_dict()
+            return response
+        except Exception as e:
+            # Fallback if get_raw_quota_entry is not available in this SDK version
+            try:
+                response = self.quota_api.get_quota_entry(quota_id)
+                return response.to_dict() if hasattr(response, "to_dict") else response
+            except Exception:
+                raise RuntimeError(f"Failed to get raw quota {quota_id}: {e}")
+
+    def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
+        """List snapshots associated with a specific path."""
+        try:
+            # PAPI list_snapshots can filter by path
+            response = self.snapshot_api.list_snapshots(path=path)
+            snapshots = []
+            for s in response.snapshots:
+                snapshots.append({
+                    "id": s.id,
+                    "name": s.name,
+                    "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if hasattr(s, "created") else "N/A",
+                    "path": s.path,
+                    "size": getattr(s, "size", 0),
+                })
+            return snapshots
+        except Exception as e:
+            # Silently return empty if Snapshot API fails (e.g. no permissions)
+            return []
+
+    def get_acl_for_path(self, path: str, access_zone: str = "system") -> Dict[str, Any]:
+        """Get the Access Control List for a path."""
+        try:
+            # Use Namespace API to get ACL
+            # Path usually needs to be formatted or relative to /ifs
+            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
+            response = self.namespaces_api.get_acl(ifs_path)
+            if hasattr(response, "to_dict"):
+                return response.to_dict()
+            return response
+        except Exception as e:
+            return {"error": str(e), "note": "ACL retrieval requires Namespace API access"}
+
+    def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Update a quota using a dynamic dictionary of properties."""
+        try:
+            import isi_sdk
+            # Dynamically determine the model
+            if self._sdk_models_version == "v9_12_0":
+                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+            else:
+                from isi_sdk.models.quota_entry import QuotaEntry as SDKQuotaEntry
+            
+            # Create a blank update object
+            update_obj = SDKQuotaEntry()
+            
+            # Map dictionary keys to object attributes
+            for key, value in payload.items():
+                if hasattr(update_obj, key):
+                    # Handle nested objects like 'limits' if they are dicts
+                    if key == "limits" and isinstance(value, dict):
+                        if self._sdk_models_version == "v9_12_0":
+                            from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+                        else:
+                            from isi_sdk.models.quota_limits import QuotaLimits
+                        limits_obj = QuotaLimits()
+                        for l_key, l_val in value.items():
+                            if hasattr(limits_obj, l_key):
+                                setattr(limits_obj, l_key, l_val)
+                        setattr(update_obj, key, limits_obj)
+                    else:
+                        setattr(update_obj, key, value)
+            
+            response = self.quota_api.update_quota_entry(quota_id, update_obj)
+            return response.to_dict() if hasattr(response, "to_dict") else response
+        except Exception as e:
+            raise RuntimeError(f"Dynamic update failed: {e}")
+
     def list_access_zones(self) -> List[str]:
         """
         Get list of available access zones.
@@ -332,3 +495,51 @@ class IsilonAPI:
         except Exception:
             # Default zones if API fails
             return ["system", "local"]
+
+    def create_quota(
+        self,
+        path: str,
+        type: str = "directory",
+        hard_limit_gb: float = 0,
+        soft_limit_gb: float = 0,
+        access_zone: str = "system",
+        enforced: bool = True,
+        include_snapshots: bool = False,
+    ) -> str:
+        """Create a new quota and return its ID."""
+        try:
+            import isi_sdk
+            # Dynamically determine the model
+            if self._sdk_models_version == "v9_12_0":
+                from isi_sdk.v9_12_0.models.quota_quota import QuotaQuota
+                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+            else:
+                from isi_sdk.models.quota_quota import QuotaQuota
+                from isi_sdk.models.quota_limits import QuotaLimits
+
+            limits = QuotaLimits(
+                hard=int(round(hard_limit_gb * (1024**3))),
+                soft=int(round(soft_limit_gb * (1024**3)))
+            )
+            
+            quota = QuotaQuota(
+                path=path,
+                type=type,
+                limits=limits,
+                enforced=enforced,
+                include_snapshots=include_snapshots,
+                zone=access_zone
+            )
+            
+            response = self.quota_api.create_quota(quota)
+            return response.id
+        except Exception as e:
+            raise RuntimeError(f"Failed to create quota on {path}: {e}")
+
+    def delete_quota(self, quota_id: str) -> bool:
+        """Delete a quota entry."""
+        try:
+            self.quota_api.delete_quota_entry(quota_id)
+            return True
+        except Exception as e:
+            raise RuntimeError(f"Failed to delete quota {quota_id}: {e}")

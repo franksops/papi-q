@@ -151,6 +151,96 @@ def create_quota_viewer(
     return {}
 
 
+def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dict[str, Any]:
+    """
+    Render an editable grid for any dictionary object.
+    Returns a dictionary of modified fields.
+    """
+    st.markdown("### 🔧 Dynamic Property Editor")
+    st.caption("Editable fields are shown as inputs. Complex objects are read-only.")
+    
+    modified_payload = {}
+    
+    # Sort keys for consistent UI
+    for key in sorted(obj.keys()):
+        val = obj[key]
+        
+        # Skip internal ID or system fields we shouldn't edit directly in the grid
+        if key in ["id", "usage", "persona"]:
+            st.text(f"{key}: {val}")
+            continue
+            
+        if isinstance(val, bool):
+            new_val = st.checkbox(f"{key}", value=val, key=f"{key_prefix}_{key}")
+            if new_val != val:
+                modified_payload[key] = new_val
+        elif isinstance(val, (int, float)):
+            # Special handling for limits to show GB in label but keep bytes in value
+            label = f"{key}"
+            if "limit" in key.lower():
+                gb_val = val / (1024**3)
+                st.info(f"💡 {key} is approx {gb_val:.2f} GB")
+            
+            new_val = st.number_input(label, value=val, key=f"{key_prefix}_{key}")
+            if new_val != val:
+                modified_payload[key] = new_val
+        elif isinstance(val, str):
+            new_val = st.text_input(f"{key}", value=val, key=f"{key_prefix}_{key}")
+            if new_val != val:
+                modified_payload[key] = new_val
+        elif isinstance(val, dict):
+            with st.expander(f"📁 {key} (Nested)"):
+                # Recursively render nested if it's 'limits', otherwise just show JSON
+                if key == "limits":
+                    nested_mods = render_dynamic_grid(val, key_prefix=f"{key_prefix}_{key}")
+                    if nested_mods:
+                        modified_payload[key] = nested_mods
+                else:
+                    st.json(val)
+        elif isinstance(val, list):
+            st.text(f"📝 {key}: {', '.join(map(str, val)) if val else '[]'}")
+            
+    return modified_payload
+
+
+def render_snapshot_viewer(snapshots: List[Dict[str, Any]]):
+    """Render a table of snapshots."""
+    st.markdown("### 📸 Associated Snapshots")
+    if not snapshots:
+        st.info("No snapshots found for this path.")
+        return
+        
+    df = pd.DataFrame(snapshots)
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+def render_acl_viewer(acl: Dict[str, Any]):
+    """Render the ACL/Permissions view."""
+    st.markdown("### 🔒 Filesystem Permissions (ACL)")
+    
+    if "error" in acl:
+        st.error(f"Could not retrieve ACL: {acl['error']}")
+        st.info(acl.get("note", ""))
+        return
+        
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Owner", acl.get("owner", "N/A"))
+    with col2:
+        st.metric("Group", acl.get("group", "N/A"))
+        
+    st.write("**Access Control Entries:**")
+    aces = acl.get("acl", [])
+    if not aces:
+        st.text("No explicit ACEs found (Inherited or POSIX only)")
+    else:
+        for ace in aces:
+            trustee = ace.get("trustee", {}).get("name", "Unknown")
+            type_ = ace.get("type", "unknown")
+            access = ace.get("accessdesc", "N/A")
+            st.markdown(f"**{trustee}** ({type_}): `{access}`")
+
+
 def create_modification_form(
     quota: QuotaEntry,
     key_prefix: str = "modify_form",
@@ -178,6 +268,8 @@ def create_modification_form(
                 step=1.0,
                 format="%.2f",
             )
+            if new_hard > 0 and new_hard < quota.usage_gb:
+                st.error(f"⚠️ Warning: New limit ({new_hard:.2f} GB) is below current usage ({quota.usage_gb:.2f} GB)")
         
         with col2:
             new_soft = st.number_input(

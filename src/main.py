@@ -8,8 +8,15 @@ from src.config import load_config, load_clusters, save_clusters, add_cluster, r
 from src.api import IsilonAPI, QuotaEntry, Status
 from src.audit import write_audit_entry
 from src.utils import filter_quotas, get_top_offenders, paginate_list
-from src.ui.components import create_modification_form, status_badge, color_for_status
-from src.ui.session import init_session, set_api_client, clear_api_client
+from src.ui.components import (
+    create_modification_form, 
+    status_badge, 
+    color_for_status,
+    render_dynamic_grid,
+    render_snapshot_viewer,
+    render_acl_viewer
+)
+from src.ui.session import init_session, set_api_client, clear_api_client, handle_api_error
 import pandas as pd
 
 # Set page config with custom title and icon
@@ -96,12 +103,16 @@ def login_section():
     cluster_names = list(clusters.keys())
     selected_cluster = st.sidebar.selectbox(
         "Select Cluster",
-        options=cluster_names,
+        options=cluster_names + ["Custom URL..."],
         key="selected_cluster",
     )
     
+    custom_url = ""
+    if selected_cluster == "Custom URL...":
+        custom_url = st.sidebar.text_input("Isilon URL", placeholder="https://isilon.local:8080")
+    
     # Credentials
-    username = st.sidebar.text_input("Username", key="login_username")
+    username = st.sidebar.text_input("Username", key="login_username", placeholder="domain\\user or user")
     password = st.sidebar.text_input("Password", type="password", key="login_password")
     
     # SSL setting
@@ -117,11 +128,18 @@ def login_section():
             st.sidebar.error("Username and password are required")
             return
         
-        if selected_cluster not in clusters:
-            st.sidebar.error("Invalid cluster selected")
-            return
+        cluster_url = ""
+        cluster_display_name = ""
         
-        cluster_url = clusters[selected_cluster]
+        if selected_cluster == "Custom URL...":
+            if not custom_url:
+                st.sidebar.error("Please enter a custom URL")
+                return
+            cluster_url = custom_url
+            cluster_display_name = custom_url.split("//")[-1].split(":")[0]
+        else:
+            cluster_url = clusters[selected_cluster]
+            cluster_display_name = selected_cluster
         
         try:
             # Create API client
@@ -134,7 +152,7 @@ def login_section():
             set_api_client(api)
             
             # Store additional session state
-            state.selected_cluster = selected_cluster
+            state.selected_cluster = cluster_display_name
             state.admin_user = username
             
             st.success(f"✅ Connected to {selected_cluster}")
@@ -200,16 +218,157 @@ def main_view():
     
     st.title(f"📊 SmartQuota Manager - {state.selected_cluster}")
     
-    tabs = st.tabs(["📈 Monitoring", "🔧 Modify", "📜 Audit Log"])
+    tabs = st.tabs(["📈 Monitoring", "🔧 Modify", "➕ Create", "📜 Audit Log", "📥 Export"])
     
     with tabs[0]:
         monitoring_tab()
     
     with tabs[1]:
         modify_tab()
-    
+        
     with tabs[2]:
+        create_tab()
+    
+    with tabs[3]:
         audit_tab()
+        
+    with tabs[4]:
+        export_tab()
+
+
+def create_tab():
+    """Tab for creating new quotas."""
+    st.header("Provision New Quota ➕")
+    
+    if not state.api_client:
+        st.warning("Login required")
+        return
+        
+    api = state.api_client
+    
+    with st.form("create_quota_form"):
+        path = st.text_input("Filesystem Path", placeholder="/ifs/data/...")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            q_type = st.selectbox("Quota Type", ["directory", "user", "group", "default-user", "default-group"])
+            access_zone = st.selectbox("Access Zone", api.list_access_zones())
+        
+        with col2:
+            hard_limit = st.number_input("Hard Limit (GB)", min_value=0.0, step=1.0)
+            soft_limit = st.number_input("Soft Limit (GB)", min_value=0.0, step=1.0)
+
+        enforced = st.checkbox("Enforced", value=True)
+        include_snapshots = st.checkbox("Include Snapshots in Usage", value=False)
+        
+        submit = st.form_submit_button("CREATE QUOTA", type="primary", use_container_width=True)
+        
+    if submit:
+        if not path.startswith("/ifs"):
+            st.error("Path must start with /ifs")
+            return
+            
+        try:
+            with st.spinner(f"Creating quota on {path}..."):
+                new_id = api.create_quota(
+                    path=path,
+                    type=q_type,
+                    hard_limit_gb=hard_limit,
+                    soft_limit_gb=soft_limit,
+                    access_zone=access_zone,
+                    enforced=enforced,
+                    include_snapshots=include_snapshots
+                )
+                
+                # Audit log
+                write_audit_entry(
+                    admin=state.admin_user or "unknown",
+                    cluster=state.selected_cluster,
+                    action="QUOTA_CREATE",
+                    share_name=path.split("/")[-1],
+                    path=path,
+                    old_limit_gb=0,
+                    new_limit_gb=hard_limit
+                )
+                
+                st.success(f"✅ Quota created successfully! ID: {new_id}")
+                # Reset cache
+                if "quotas_loaded" in state:
+                    del state.quotas_loaded
+        except Exception as e:
+            if not handle_api_error(e):
+                st.error(f"Failed to create quota: {e}")
+
+
+def export_tab():
+    """Tab for bulk exporting quotas."""
+    st.header("Bulk Export 📥")
+    
+    if not state.api_client:
+        st.warning("Login required")
+        return
+        
+    api = state.api_client
+    
+    st.markdown("Download full quota reports for the current cluster.")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.subheader("Export Options")
+        export_type = st.radio(
+            "Select Export Scope",
+            ["All Quotas", "By Access Zone", "By Protocol"],
+            key="export_scope_radio"
+        )
+        
+        selected_zone = "All"
+        if export_type == "By Access Zone":
+            zones = api.list_access_zones()
+            selected_zone = st.selectbox("Select Zone", zones)
+            
+        selected_protocol = "All"
+        if export_type == "By Protocol":
+            selected_protocol = st.selectbox("Select Protocol", ["SMB", "NFS"])
+
+    with col2:
+        st.subheader("Generate Report")
+        if st.button("Generate & Download CSV", use_container_width=True):
+            with st.spinner("Fetching all quotas (this may take a minute)..."):
+                try:
+                    # Fetch all quotas (paginated)
+                    all_quotas = api.list_all_quotas()
+                    
+                    # Fetch protocol mapping
+                    mapping = api.get_protocol_mapping()
+                    
+                    # Convert to list of dicts with protocol info
+                    export_data = []
+                    for q in all_quotas:
+                        d = q.to_dict()
+                        # Add protocol
+                        d["Protocol"] = mapping.get(q.path, "-")
+                        export_data.append(d)
+                    
+                    df = pd.DataFrame(export_data)
+                    
+                    # Apply filters if needed
+                    if export_type == "By Access Zone":
+                        df = df[df["access_zone"] == selected_zone]
+                    elif export_type == "By Protocol":
+                        df = df[df["Protocol"].str.contains(selected_protocol, na=False)]
+                        
+                    csv = df.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="Click here to download",
+                        data=csv,
+                        file_name=f"quota_export_{export_type.lower().replace(' ', '_')}_{state.selected_cluster}.csv",
+                        mime="text/csv",
+                        use_container_width=True
+                    )
+                    st.success(f"Report generated with {len(df)} entries.")
+                except Exception as e:
+                    st.error(f"Failed to generate report: {e}")
 
 
 def monitoring_tab():
@@ -227,7 +386,8 @@ def monitoring_tab():
                 state.quotas_loaded = True
                 st.session_state.last_quota_list = quotas
             except Exception as e:
-                st.error(f"Failed to load quotas: {e}")
+                if not handle_api_error(e):
+                    st.error(f"Failed to load quotas: {e}")
                 return
     
     # Top offenders cards
@@ -273,6 +433,22 @@ def monitoring_tab():
         access_zone=access_zone if access_zone != "All" else None,
     )
     
+    # Export section
+    st.divider()
+    col_exp1, col_exp2 = st.columns([4, 1])
+    with col_exp2:
+        if filtered:
+            # Prepare export data
+            export_df = pd.DataFrame([q.to_dict() for q in filtered])
+            csv = export_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Export to CSV",
+                data=csv,
+                file_name=f"quotas_{state.selected_cluster}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+
     # Paginate
     page = st.number_input("Page", min_value=1, value=1, key="quota_page")
     page_size = 25
@@ -309,8 +485,8 @@ def monitoring_tab():
 
 
 def modify_tab():
-    """Tab for quota modification."""
-    st.header("Modify Quotas")
+    """Tab for universal quota and path modification."""
+    st.header("Universal Object Manager 🛠️")
     
     if not state.api_client:
         st.warning("Login required")
@@ -319,66 +495,115 @@ def modify_tab():
     api = state.api_client
     
     # Get selected quotas
-    if "selected_quota_paths" not in state:
-        st.info("Select quotas from the Monitoring tab to modify them.")
+    if "selected_quota_paths" not in state or not state.selected_quota_paths:
+        st.info("Select a quota from the Monitoring tab to manage it.")
         return
     
-    if not state.selected_quota_paths:
-        st.info("No quotas selected. Go to Monitoring tab and select some.")
-        return
+    # For simplicity in Universal view, we manage one object at a time if multiple selected
+    selected_path_str = state.selected_quota_paths[0]
     
-    # Map paths back to quota objects
-    selected_quotas = []
+    # Find the quota object
+    quota = None
     for q in state.quotas:
-        path_name = f"{q.path} ({q.usage_percent:.1f}%)"
-        if path_name in state.selected_quota_paths:
-            selected_quotas.append(q)
-    
-    if not selected_quotas:
-        st.info("Could not find selected quotas.")
+        if f"{q.path} ({q.usage_percent:.1f}%)" == selected_path_str:
+            quota = q
+            break
+            
+    if not quota:
+        st.error("Selected quota not found in session.")
         return
-    
-    st.subheader(f"Modifying {len(selected_quotas)} quota(s)")
-    
-    for quota in selected_quotas:
-        st.markdown(f"### {quota.path.split('/')[-1]}")
-        st.markdown(f"**Path**: {quota.path}")
-        
-        result = create_modification_form(quota, key_prefix=f"form_{quota.id}")
-        
-        if result:
-            if st.button("CONFIRM AND MODIFY", key=f"confirm_{quota.id}", type="primary"):
-                try:
-                    modified = api.update_quota(
-                        quota_id=quota.id,
-                        hard_limit_gb=result["hard_limit_gb"],
-                        soft_limit_gb=result["soft_limit_gb"],
-                        apply_to_children=result["apply_to_children"],
-                    )
-                    
-                    # Write audit log
-                    admin = state.admin_user or state.login_username or "unknown"
-                    write_audit_entry(
-                        admin=admin,
-                        cluster=state.selected_cluster,
-                        action="QUOTA_MODIFY",
-                        share_name=quota.path.split("/")[-1],
-                        path=quota.path,
-                        old_limit_gb=quota.hard_limit_gb,
-                        new_limit_gb=modified.hard_limit_gb,
-                    )
-                    
-                    st.success(f"✅ Modified {quota.path}")
-                    
-                    # Refresh quota data
-                    for i, q in enumerate(state.quotas):
-                        if q.id == quota.id:
-                            state.quotas[i] = modified
-                            break
-                    
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Failed to modify quota: {e}")
+
+    st.title(f"📁 {quota.path.split('/')[-1]}")
+    st.caption(f"Full Path: {quota.path}")
+
+    # Tabs for different aspects of the filesystem object
+    obj_tabs = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions (ACL)"])
+
+    with obj_tabs[0]:
+        try:
+            # Fetch raw data for dynamic grid
+            raw_quota = api.get_raw_quota(quota.id)
+            
+            # Render Dynamic Grid
+            with st.form(key=f"universal_form_{quota.id}"):
+                modified_payload = render_dynamic_grid(raw_quota, key_prefix=f"univ_{quota.id}")
+                
+                st.divider()
+                st.warning("⚠️ Changes here affect production. Verify all fields.")
+                confirm = st.checkbox("I confirm these changes", key=f"conf_{quota.id}")
+                submit = st.form_submit_button("APPLY CHANGES", type="primary", use_container_width=True)
+                
+            if submit and confirm:
+                if not modified_payload:
+                    st.info("No changes detected.")
+                else:
+                    with st.spinner("Applying changes..."):
+                        updated_raw = api.update_quota_dynamic(quota.id, modified_payload)
+                        
+                        # Write audit log
+                        admin = state.admin_user or "unknown"
+                        write_audit_entry(
+                            admin=admin,
+                            cluster=state.selected_cluster,
+                            action="QUOTA_DYNAMIC_MODIFY",
+                            share_name=quota.path.split("/")[-1],
+                            path=quota.path,
+                            old_limit_gb=quota.hard_limit_gb,
+                            new_limit_gb=updated_raw.get("limits", {}).get("hard", 0) / (1024**3),
+                        )
+                        
+                        st.success("✅ Successfully updated quota!")
+                        # Clear cache to force reload
+                        if "quotas_loaded" in state:
+                            del state.quotas_loaded
+                        st.rerun()
+        except Exception as e:
+            if not handle_api_error(e):
+                st.error(f"Error loading quota details: {e}")
+
+    # Add Delete capability at the bottom of Quota Settings tab
+    with obj_tabs[0]:
+        st.divider()
+        with st.expander("🗑️ Decommission Quota", expanded=False):
+            st.error("DANGER: This action will permanently delete the quota entry.")
+            delete_confirm = st.text_input("Type 'DELETE' to confirm", key=f"del_confirm_{quota.id}")
+            if st.button("DELETE QUOTA PERMANENTLY", type="primary", key=f"del_btn_{quota.id}", use_container_width=True):
+                if delete_confirm == "DELETE":
+                    try:
+                        api.delete_quota(quota.id)
+                        write_audit_entry(
+                            admin=state.admin_user or "unknown",
+                            cluster=state.selected_cluster,
+                            action="QUOTA_DELETE",
+                            share_name=quota.path.split("/")[-1],
+                            path=quota.path,
+                            old_limit_gb=quota.hard_limit_gb,
+                            new_limit_gb=0
+                        )
+                        st.success("✅ Quota deleted.")
+                        if "quotas_loaded" in state:
+                            del state.quotas_loaded
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete: {e}")
+                else:
+                    st.warning("Please type 'DELETE' to confirm.")
+
+    with obj_tabs[1]:
+        try:
+            with st.spinner("Fetching snapshots..."):
+                snapshots = api.get_snapshots_for_path(quota.path)
+                render_snapshot_viewer(snapshots)
+        except Exception as e:
+            st.error(f"Error fetching snapshots: {e}")
+
+    with obj_tabs[2]:
+        try:
+            with st.spinner("Fetching ACLs..."):
+                acl = api.get_acl_for_path(quota.path, access_zone=quota.access_zone)
+                render_acl_viewer(acl)
+        except Exception as e:
+            st.error(f"Error fetching ACLs: {e}")
 
 
 def audit_tab():
