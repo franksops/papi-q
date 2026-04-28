@@ -73,12 +73,22 @@ def sidebar_tools():
     if not state.api_client: return
     st.sidebar.header(f"📍 {state.selected_cluster}")
     
-    c1, c2 = st.sidebar.columns(2)
-    if c1.button("🚪 Logout", use_container_width=True):
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
         clear_api_client()
         st.rerun()
     
-    if c2.button("🛑 Shutdown", use_container_width=True, type="primary"):
+    with st.sidebar.expander("⚙️ Inventory"):
+        inv = load_clusters()
+        for n, u in inv.items():
+            c1, c2 = st.columns([4, 1])
+            c1.caption(f"{n}")
+            if c2.button("🗑️", key=f"d_{n}"):
+                remove_cluster(n)
+                st.rerun()
+
+def sidebar_footer():
+    st.sidebar.divider()
+    if st.sidebar.button("🛑 Shutdown Application", use_container_width=True, type="primary"):
         state.confirm_shutdown = True
 
     if state.get("confirm_shutdown"):
@@ -92,15 +102,6 @@ def sidebar_tools():
             state.confirm_shutdown = False
             st.rerun()
 
-    with st.sidebar.expander("⚙️ Inventory"):
-        inv = load_clusters()
-        for n, u in inv.items():
-            c1, c2 = st.columns([4, 1])
-            c1.caption(f"{n}")
-            if c2.button("🗑️", key=f"d_{n}"):
-                remove_cluster(n)
-                st.rerun()
-
 
 def main():
     if not st.session_state.get("startup_logged"):
@@ -112,6 +113,8 @@ def main():
     else:
         sidebar_tools()
         dashboard()
+    
+    sidebar_footer()
 
 
 def dashboard():

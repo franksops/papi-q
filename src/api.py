@@ -1,6 +1,7 @@
 """OneFS API client wrapper for SmartQuota Manager."""
 
 import urllib3
+import importlib
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -88,27 +89,43 @@ class IsilonAPI:
         self.cluster_url = self.format_url(cluster_url)
         self.verify_ssl = verify_ssl
         try:
+            # Try both possible package names
             try:
-                import isi_sdk as sdk_module
+                import isi_sdk as sdk
             except ImportError:
-                import isilon_sdk as sdk_module
+                import isilon_sdk as sdk
             
-            self.sdk = sdk_module
-            # Dynamically load models
+            self.sdk = sdk
+            
+            # Attempt to find models with various fallback paths
             try:
-                # Try v9_12_0 path first
-                from sdk_module.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
-                from sdk_module.v9_12_0.models.quota_limits import QuotaLimits
-                from sdk_module.v9_12_0.models.quota_quota import QuotaQuota
+                # OneFS 9.12+ specific path
+                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
+                from isi_sdk.v9_12_0.models.quota_quota import QuotaQuota
                 self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
             except ImportError:
-                # Fallback to base models
-                SDKQuotaEntry = getattr(sdk_module.models.quota_entry, "QuotaEntry")
-                QuotaLimits = getattr(sdk_module.models.quota_limits, "QuotaLimits")
-                QuotaQuota = getattr(sdk_module.models.quota_quota, "QuotaQuota")
-                self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
+                try:
+                    # OneFS 9.12+ with isilon_sdk name
+                    from isilon_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                    from isilon_sdk.v9_12_0.models.quota_limits import QuotaLimits
+                    from isilon_sdk.v9_12_0.models.quota_quota import QuotaQuota
+                    self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
+                except ImportError:
+                    # Generic fallback (older SDK versions)
+                    import importlib
+                    pkg_name = sdk.__name__
+                    m_entry = importlib.import_module(f"{pkg_name}.models.quota_entry")
+                    m_limits = importlib.import_module(f"{pkg_name}.models.quota_limits")
+                    m_quota = importlib.import_module(f"{pkg_name}.models.quota_quota")
+                    
+                    self._models = {
+                        "entry": getattr(m_entry, "QuotaEntry"),
+                        "limits": getattr(m_limits, "QuotaLimits"),
+                        "quota": getattr(m_quota, "QuotaQuota")
+                    }
         except Exception as e:
-            raise ImportError(f"isilon-sdk is installed but modules (isi_sdk/isilon_sdk) are inaccessible: {e}")
+            raise ImportError(f"SDK Error: {e}")
         
         self.configuration = self.sdk.Configuration()
         self.configuration.host = self.cluster_url
