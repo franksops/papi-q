@@ -86,6 +86,7 @@ class IsilonAPI:
 
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = self.format_url(cluster_url)
+        self.verify_ssl = verify_ssl
         try:
             try:
                 import isi_sdk as sdk_module

@@ -370,6 +370,7 @@ class IsilonAPI:
 
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = self.format_url(cluster_url)
+        self.verify_ssl = verify_ssl
         try:
             try:
                 import isi_sdk as sdk_module
@@ -910,10 +911,14 @@ def login_section():
     inv = load_clusters()
     selected = st.sidebar.selectbox("Cluster", options=list(inv.keys()) + ["Custom URL..."], key="selected_cluster_box")
     
-    url_input = st.sidebar.text_input("IP or Hostname", placeholder="10.1.1.50") if selected == "Custom URL..." else inv.get(selected, "")
+    url_input = st.sidebar.text_input("IP, Hostname, or URL", placeholder="10.1.1.50 or http://10.1.1.50") if selected == "Custom URL..." else inv.get(selected, "")
     user = st.sidebar.text_input("Username", placeholder="user, domain\\user, or user@domain")
     pwd = st.sidebar.text_input("Password", type="password")
-    skip_ssl = st.sidebar.checkbox("Ignore SSL", value=True)
+    
+    # SSL/Protocol Context
+    is_http = url_input.lower().startswith("http://")
+    skip_ssl = st.sidebar.checkbox("Ignore SSL (HTTPS only)", value=True, disabled=is_http)
+    if is_http: st.sidebar.info("💡 Using plain HTTP (unencrypted)")
     
     if st.sidebar.button("Connect", use_container_width=True):
         if not all([url_input, user, pwd]):
