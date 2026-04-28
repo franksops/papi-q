@@ -1009,7 +1009,6 @@ def login_section():
     selected = st.sidebar.selectbox("Cluster", options=list(inv.keys()) + ["Custom URL..."], key="selected_cluster_box")
     
     url_input = st.sidebar.text_input("IP, Hostname, or URL", placeholder="10.1.1.50 or http://10.1.1.50") if selected == "Custom URL..." else inv.get(selected, "")
-    display_name_input = st.sidebar.text_input("Display Name (Optional)", placeholder="My Cluster Name") if selected == "Custom URL..." else ""
     user = st.sidebar.text_input("Username", placeholder="user, domain\\user, or user@domain")
     pwd = st.sidebar.text_input("Password", type="password")
     
@@ -1027,14 +1026,8 @@ def login_section():
             # Auto-format URL
             url = IsilonAPI.format_url(url_input)
             p = urlparse(url)
-            host = p.hostname or url_input.split("//")[-1].split(":")[0] or "unknown_cluster"
-            
-            # Determine display name
-            if selected == "Custom URL...":
-                clean_name = display_name_input.strip()
-                display_name = f"{clean_name} ({host})" if clean_name else host
-            else:
-                display_name = selected
+            host = p.hostname or url.split("//")[-1].split(":")[0] or "unknown_cluster"
+            display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
             
             api = IsilonAPI(url, user, pwd, verify_ssl=not skip_ssl)
             set_api_client(api)
@@ -1042,7 +1035,7 @@ def login_section():
             
             state.selected_cluster = display_name
             state.admin_user = user
-            log_info(f"User {user} connected to {url} as {display_name}")
+            log_info(f"User {user} connected to {url}")
             st.rerun()
         except Exception as e:
             log_error(f"Login failed for {user} at {url_input}", e)
