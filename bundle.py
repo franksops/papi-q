@@ -98,13 +98,27 @@ def bootstrap():
         os.execv(venv_python, [venv_python] + sys.argv)
 
     # --- VERIFICATION PHASE (Inside Venv) ---
-    deps_map = {"streamlit": "streamlit", "isi_sdk": "isilon-sdk", "pandas": "pandas", "urllib3": "urllib3", "dotenv": "python-dotenv"}
+    deps_map = {
+        "streamlit": "streamlit",
+        "pandas": "pandas",
+        "urllib3": "urllib3",
+        "dotenv": "python-dotenv"
+    }
     missing = []
     for mod, pkg in deps_map.items():
         try:
             __import__(mod)
         except ImportError:
             missing.append(pkg)
+            
+    # Special check for Isilon SDK (can be isi_sdk or isilon_sdk)
+    try:
+        try:
+            import isi_sdk
+        except ImportError:
+            import isilon_sdk
+    except ImportError:
+        missing.append("isilon-sdk")
     
     if missing:
         # Check if we are in a 'Zombie' state (pip thinks they exist, but python can't find them)

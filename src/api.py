@@ -76,21 +76,27 @@ class IsilonAPI:
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = cluster_url.rstrip("/")
         try:
-            import isi_sdk
-            self.sdk = isi_sdk
+            try:
+                import isi_sdk as sdk_module
+            except ImportError:
+                import isilon_sdk as sdk_module
+            
+            self.sdk = sdk_module
             # Dynamically load models
             try:
-                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
-                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
-                from isi_sdk.v9_12_0.models.quota_quota import QuotaQuota
+                # Try v9_12_0 path first
+                from sdk_module.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
+                from sdk_module.v9_12_0.models.quota_limits import QuotaLimits
+                from sdk_module.v9_12_0.models.quota_quota import QuotaQuota
                 self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
             except ImportError:
-                from isi_sdk.models.quota_entry import QuotaEntry as SDKQuotaEntry
-                from isi_sdk.models.quota_limits import QuotaLimits
-                from isi_sdk.models.quota_quota import QuotaQuota
+                # Fallback to base models
+                SDKQuotaEntry = getattr(sdk_module.models.quota_entry, "QuotaEntry")
+                QuotaLimits = getattr(sdk_module.models.quota_limits, "QuotaLimits")
+                QuotaQuota = getattr(sdk_module.models.quota_quota, "QuotaQuota")
                 self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
-        except ImportError:
-            raise ImportError("isilon-sdk not installed. Run: pip install isilon-sdk")
+        except Exception as e:
+            raise ImportError(f"isilon-sdk is installed but modules (isi_sdk/isilon_sdk) are inaccessible: {e}")
         
         self.configuration = self.sdk.Configuration()
         self.configuration.host = self.cluster_url
