@@ -193,7 +193,7 @@ class IsilonAPI:
             log_error("SDK Initialization Failed", e)
             raise ImportError(f"SDK Error: {e}")
 
-    def _map_quota_response(self, q: Any, fallback_zone: str = "System") -> QuotaEntry:
+    def _map_quota_response(self, q: Any) -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
         lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
         usage = getattr(q, "usage", None)
@@ -204,7 +204,7 @@ class IsilonAPI:
             usage_bytes=getattr(usage, "logical", 0) or getattr(usage, "inclusive", 0) or 0,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
-            access_zone=getattr(q, "zone", fallback_zone) or fallback_zone,
+            access_zone=getattr(q, "zone", "System") or "System",
             comment=getattr(q, "comment", ""),
         )
 
@@ -242,135 +242,54 @@ class IsilonAPI:
             log_warning(f"Protocol mapping failed: {e}")
         return mapping
 
-    def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
+    def list_quotas(self, path: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
-            if access_zone and access_zone != "All": params["zones"] = access_zone
             if token: params["continue"] = token
             
             # 0.7.0 uses list_quota_quotas, older uses list_quotas
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
             resp = method(**params)
             
-            fallback = access_zone if access_zone and access_zone != "All" else "System"
-            return [self._map_quota_response(q, fallback) for q in resp.quotas], getattr(resp, "continue", None)
+            return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        """Fetch all quotas. If access_zone is None or 'All', iterates through all available zones."""
-        all_q = []
+        """Fetch all quotas cluster-wide and map them to their respective Access Zones."""
+        all_q, token = [], None
+        while True:
+            qs, token = self.list_quotas(path, token=token)
+            all_q.extend(qs)
+            if not token or len(all_q) > 10000: break
         
-        # Determine which zones to query
+        # Enrich quotas with Zone info based on path
+        zones_info = self.get_access_zones_info()
+        # Sort zones by path length descending to match most specific path first
+        sorted_zones = sorted(zones_info.items(), key=lambda x: len(x[1]), reverse=True)
+        
+        for q in all_q:
+            # Only override if it's currently 'System' or the API didn't provide it
+            if q.access_zone == "System":
+                for zone_name, zone_path in sorted_zones:
+                    if q.path.startswith(zone_path):
+                        q.access_zone = zone_name
+                        break
+        
+        # Manual filtering if access_zone was requested
         if access_zone and access_zone != "All":
-            zones_to_query = [access_zone]
-        else:
-            zones_to_query = self.list_access_zones()
-
-        for zone in zones_to_query:
-            token = None
-            zone_quotas = []
-            while True:
-                qs, token = self.list_quotas(path, zone, token=token)
-                zone_quotas.extend(qs)
-                if not token or len(zone_quotas) > 10000: break
-            all_q.extend(zone_quotas)
+            all_q = [q for q in all_q if q.access_zone == access_zone]
             
         return all_q
 
-    def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
-        """Fetch raw quota dictionary for the Dynamic Grid."""
-        try:
-            # 0.7.0 uses get_quota_quota, older uses get_quota_entry
-            method = getattr(self.quota_api, "get_quota_quota", None) or getattr(self.quota_api, "get_quota_entry")
-            resp = method(quota_id)
-            return resp.to_dict() if hasattr(resp, "to_dict") else {}
-        except Exception as e:
-            raise RuntimeError(f"Fetch failed: {e}")
-
-    def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        try:
-            update_obj = self._models["entry"]()
-            for k, v in payload.items():
-                # Handle thresholds vs limits
-                if (k == "limits" or k == "thresholds") and isinstance(v, dict):
-                    lims = self._models["limits"]()
-                    for lk, lv in v.items():
-                        if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
-                    setattr(update_obj, k, lims)
-                elif hasattr(update_obj, k):
-                    setattr(update_obj, k, v)
-            
-            # 0.7.0 uses update_quota_quota, older uses update_quota_entry
-            method = getattr(self.quota_api, "update_quota_quota", None) or getattr(self.quota_api, "update_quota_entry")
-            resp = method(quota_id, update_obj)
-            return resp.to_dict() if hasattr(resp, "to_dict") else {}
-        except Exception as e:
-            raise RuntimeError(f"Update Failed: {e}")
-
-    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, snapshots: bool = False) -> str:
-        """Create new quota. Only sets non-zero limits to avoid unintended overwrites."""
-        try:
-            q_limits = self._models["limits"]()
-            if limits.get("hard"): q_limits.hard = int(round(limits["hard"] * (1024**3)))
-            if limits.get("soft"): q_limits.soft = int(round(limits["soft"] * (1024**3)))
-            if limits.get("advisory"): q_limits.advisory = int(round(limits["advisory"] * (1024**3)))
-            
-            # 0.7.0 uses 'thresholds', older uses 'limits'
-            params = {
-                "path": path, "type": q_type, 
-                "enforced": enforced, "include_snapshots": snapshots, "zone": access_zone
-            }
-            if hasattr(self._models["quota"](), "thresholds"):
-                params["thresholds"] = q_limits
-            else:
-                params["limits"] = q_limits
-                
-            q_body = self._models["quota"](**params)
-            
-            # 0.7.0 uses create_quota_quota, older uses create_quota
-            method = getattr(self.quota_api, "create_quota_quota", None) or getattr(self.quota_api, "create_quota")
-            resp = method(q_body)
-            return resp.id
-        except Exception as e:
-            raise RuntimeError(f"Create Failed: {e}")
-
-    def delete_quota(self, quota_id: str) -> bool:
-        try:
-            # 0.7.0 uses delete_quota_quota, older uses delete_quota_entry
-            method = getattr(self.quota_api, "delete_quota_quota", None) or getattr(self.quota_api, "delete_quota_entry")
-            method(quota_id)
-            return True
-        except Exception as e:
-            raise RuntimeError(f"Delete Failed: {e}")
-
-    def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
-        """List snapshots, sorted newest first."""
-        if not self.snapshot_api: return []
-        try:
-            resp = self.snapshot_api.list_snapshots(path=path)
-            snaps = [{
-                "id": s.id, "name": s.name, "created_epoch": s.created,
-                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
-                "size": getattr(s, "size", 0)
-            } for s in resp.snapshots]
-            snaps.sort(key=lambda x: x["created_epoch"] or 0, reverse=True)
-            return snaps
-        except Exception: return []
-
-    def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
-        """Fetch ACL from Namespace API with explicit zone support."""
-        if not self.namespaces_api: return {"error": "Namespace API not available"}
-        try:
-            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
-            resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
-            return resp.to_dict() if hasattr(resp, "to_dict") else {}
-        except Exception as e: return {"error": str(e)}
-
-    def list_access_zones(self) -> List[str]:
-        if not self.namespaces_api: return ["System"]
+    def get_access_zones_info(self) -> Dict[str, str]:
+        """Returns a mapping of Zone Name -> Base Path."""
+        if not self.namespaces_api: return {"System": "/ifs"}
         try:
             resp = self.namespaces_api.get_access_zones()
-            return [z.name for z in resp.access_zones]
-        except Exception: return ["System"]
+            return {z.name: z.path for z in resp.access_zones}
+        except Exception: return {"System": "/ifs"}
+
+    def list_access_zones(self) -> List[str]:
+        return list(self.get_access_zones_info().keys())
