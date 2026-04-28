@@ -193,7 +193,7 @@ class IsilonAPI:
             log_error("SDK Initialization Failed", e)
             raise ImportError(f"SDK Error: {e}")
 
-    def _map_quota_response(self, q: Any) -> QuotaEntry:
+    def _map_quota_response(self, q: Any, fallback_zone: str = "System") -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
         lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
         usage = getattr(q, "usage", None)
@@ -204,7 +204,7 @@ class IsilonAPI:
             usage_bytes=getattr(usage, "logical", 0) or getattr(usage, "inclusive", 0) or 0,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
-            access_zone=getattr(q, "zone", "System") or "System",
+            access_zone=getattr(q, "zone", fallback_zone) or fallback_zone,
             comment=getattr(q, "comment", ""),
         )
 
@@ -217,20 +217,27 @@ class IsilonAPI:
                 # Map SMB Shares
                 if self.shares_api:
                     try:
-                        smb = self.shares_api.list_smb_shares(zone=zone)
-                        for s in smb.shares:
-                            mapping[s.path] = "SMB"
-                    except: pass
+                        # Some versions might require different arguments or have different response formats
+                        method = getattr(self.shares_api, "list_smb_shares", None)
+                        if method:
+                            smb = method(zone=zone)
+                            for s in smb.shares:
+                                mapping[s.path] = "SMB"
+                    except Exception as e:
+                        log_warning(f"SMB mapping failed for zone {zone}: {e}")
                 
                 # Map NFS Exports
                 if self.protocols_api:
                     try:
-                        nfs = self.protocols_api.list_nfs_exports(zone=zone)
-                        for e in nfs.exports:
-                            for p in e.paths:
-                                current = mapping.get(p, "")
-                                mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
-                    except: pass
+                        method = getattr(self.protocols_api, "list_nfs_exports", None)
+                        if method:
+                            nfs = method(zone=zone)
+                            for e in nfs.exports:
+                                for p in e.paths:
+                                    current = mapping.get(p, "")
+                                    mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
+                    except Exception as e:
+                        log_warning(f"NFS mapping failed for zone {zone}: {e}")
         except Exception as e:
             log_warning(f"Protocol mapping failed: {e}")
         return mapping
@@ -239,22 +246,37 @@ class IsilonAPI:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
-            if access_zone: params["zones"] = access_zone
+            if access_zone and access_zone != "All": params["zones"] = access_zone
             if token: params["continue"] = token
             
             # 0.7.0 uses list_quota_quotas, older uses list_quotas
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
             resp = method(**params)
-            return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
+            
+            fallback = access_zone if access_zone and access_zone != "All" else "System"
+            return [self._map_quota_response(q, fallback) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        all_q, token = [], None
-        while True:
-            qs, token = self.list_quotas(path, access_zone, token=token)
-            all_q.extend(qs)
-            if not token or len(all_q) > 10000: break
+        """Fetch all quotas. If access_zone is None or 'All', iterates through all available zones."""
+        all_q = []
+        
+        # Determine which zones to query
+        if access_zone and access_zone != "All":
+            zones_to_query = [access_zone]
+        else:
+            zones_to_query = self.list_access_zones()
+
+        for zone in zones_to_query:
+            token = None
+            zone_quotas = []
+            while True:
+                qs, token = self.list_quotas(path, zone, token=token)
+                zone_quotas.extend(qs)
+                if not token or len(zone_quotas) > 10000: break
+            all_q.extend(zone_quotas)
+            
         return all_q
 
     def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:

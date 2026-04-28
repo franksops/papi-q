@@ -159,37 +159,56 @@ def monitoring_tab():
     st.divider()
 
     # 3. Filtering & Search
-    sc, zc = st.columns([2, 1])
+    sc, zc, gc = st.columns([2, 1, 1])
     search = sc.text_input("Search (Path or Share Name)")
     zone_filter = zc.selectbox("Access Zone Filter", ["All Zones"] + sorted(state.get("zones", ["System"])))
+    group_by_zone = gc.checkbox("Group by Zone", value=False)
     
     # 4. Filter and Group
     filt = filter_quotas(state.quotas, search, None if zone_filter == "All Zones" else zone_filter)
     
     st.markdown(f"**Results:** {len(filt)} Quotas")
     
-    page = st.number_input("Page", min_value=1, value=1)
-    items, total = paginate_list(filt, page)
-    
-    if items:
-        df_data = []
-        for q in items:
-            df_data.append({
-                "Share": q.path.split("/")[-1],
-                "Protocol": state.protocol_map.get(q.path, "-"),
-                "Zone": q.access_zone,
-                "Path": q.path,
-                "Usage %": f"{q.usage_percent:.1f}%",
-                "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
-            })
-        
-        st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
-        
-        state.selected_quota_paths = st.multiselect("Select share to manage in Universal Manager", 
-                                                    options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
-                                                    max_selections=1)
-    else:
+    if not filt:
         st.info("No records match the current filter.")
+        return
+
+    def render_quota_table(quota_list, key_suffix=""):
+        page = st.number_input(f"Page {key_suffix}", min_value=1, value=1, key=f"page_{key_suffix}")
+        items, total = paginate_list(quota_list, page)
+        
+        if items:
+            df_data = []
+            for q in items:
+                df_data.append({
+                    "Share": q.path.split("/")[-1],
+                    "Protocol": state.protocol_map.get(q.path, "-"),
+                    "Zone": q.access_zone,
+                    "Path": q.path,
+                    "Usage %": f"{q.usage_percent:.1f}%",
+                    "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+                })
+            
+            st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+            
+            selected = st.multiselect("Select share to manage in Universal Manager", 
+                                        options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
+                                        max_selections=1,
+                                        key=f"sel_{key_suffix}")
+            if selected:
+                state.selected_quota_paths = selected
+        else:
+            st.info("No items on this page.")
+
+    if group_by_zone:
+        zones_in_filt = sorted(list(set(q.access_zone for q in filt)))
+        for z in zones_in_filt:
+            with st.expander(f"📁 Zone: {z}", expanded=True):
+                zone_items = [q for q in filt if q.access_zone == z]
+                st.caption(f"{len(zone_items)} quotas in this zone")
+                render_quota_table(zone_items, key_suffix=z)
+    else:
+        render_quota_table(filt, key_suffix="all")
 
 
 def modify_tab():

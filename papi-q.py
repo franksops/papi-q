@@ -479,7 +479,7 @@ class IsilonAPI:
             log_error("SDK Initialization Failed", e)
             raise ImportError(f"SDK Error: {e}")
 
-    def _map_quota_response(self, q: Any) -> QuotaEntry:
+    def _map_quota_response(self, q: Any, fallback_zone: str = "System") -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
         lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
         usage = getattr(q, "usage", None)
@@ -490,7 +490,7 @@ class IsilonAPI:
             usage_bytes=getattr(usage, "logical", 0) or getattr(usage, "inclusive", 0) or 0,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
-            access_zone=getattr(q, "zone", "System") or "System",
+            access_zone=getattr(q, "zone", fallback_zone) or fallback_zone,
             comment=getattr(q, "comment", ""),
         )
 
@@ -503,20 +503,27 @@ class IsilonAPI:
                 # Map SMB Shares
                 if self.shares_api:
                     try:
-                        smb = self.shares_api.list_smb_shares(zone=zone)
-                        for s in smb.shares:
-                            mapping[s.path] = "SMB"
-                    except: pass
+                        # Some versions might require different arguments or have different response formats
+                        method = getattr(self.shares_api, "list_smb_shares", None)
+                        if method:
+                            smb = method(zone=zone)
+                            for s in smb.shares:
+                                mapping[s.path] = "SMB"
+                    except Exception as e:
+                        log_warning(f"SMB mapping failed for zone {zone}: {e}")
                 
                 # Map NFS Exports
                 if self.protocols_api:
                     try:
-                        nfs = self.protocols_api.list_nfs_exports(zone=zone)
-                        for e in nfs.exports:
-                            for p in e.paths:
-                                current = mapping.get(p, "")
-                                mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
-                    except: pass
+                        method = getattr(self.protocols_api, "list_nfs_exports", None)
+                        if method:
+                            nfs = method(zone=zone)
+                            for e in nfs.exports:
+                                for p in e.paths:
+                                    current = mapping.get(p, "")
+                                    mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
+                    except Exception as e:
+                        log_warning(f"NFS mapping failed for zone {zone}: {e}")
         except Exception as e:
             log_warning(f"Protocol mapping failed: {e}")
         return mapping
@@ -525,22 +532,37 @@ class IsilonAPI:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
-            if access_zone: params["zones"] = access_zone
+            if access_zone and access_zone != "All": params["zones"] = access_zone
             if token: params["continue"] = token
             
             # 0.7.0 uses list_quota_quotas, older uses list_quotas
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
             resp = method(**params)
-            return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
+            
+            fallback = access_zone if access_zone and access_zone != "All" else "System"
+            return [self._map_quota_response(q, fallback) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        all_q, token = [], None
-        while True:
-            qs, token = self.list_quotas(path, access_zone, token=token)
-            all_q.extend(qs)
-            if not token or len(all_q) > 10000: break
+        """Fetch all quotas. If access_zone is None or 'All', iterates through all available zones."""
+        all_q = []
+        
+        # Determine which zones to query
+        if access_zone and access_zone != "All":
+            zones_to_query = [access_zone]
+        else:
+            zones_to_query = self.list_access_zones()
+
+        for zone in zones_to_query:
+            token = None
+            zone_quotas = []
+            while True:
+                qs, token = self.list_quotas(path, zone, token=token)
+                zone_quotas.extend(qs)
+                if not token or len(zone_quotas) > 10000: break
+            all_q.extend(zone_quotas)
+            
         return all_q
 
     def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
@@ -1148,37 +1170,56 @@ def monitoring_tab():
     st.divider()
 
     # 3. Filtering & Search
-    sc, zc = st.columns([2, 1])
+    sc, zc, gc = st.columns([2, 1, 1])
     search = sc.text_input("Search (Path or Share Name)")
     zone_filter = zc.selectbox("Access Zone Filter", ["All Zones"] + sorted(state.get("zones", ["System"])))
+    group_by_zone = gc.checkbox("Group by Zone", value=False)
     
     # 4. Filter and Group
     filt = filter_quotas(state.quotas, search, None if zone_filter == "All Zones" else zone_filter)
     
     st.markdown(f"**Results:** {len(filt)} Quotas")
     
-    page = st.number_input("Page", min_value=1, value=1)
-    items, total = paginate_list(filt, page)
-    
-    if items:
-        df_data = []
-        for q in items:
-            df_data.append({
-                "Share": q.path.split("/")[-1],
-                "Protocol": state.protocol_map.get(q.path, "-"),
-                "Zone": q.access_zone,
-                "Path": q.path,
-                "Usage %": f"{q.usage_percent:.1f}%",
-                "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
-            })
-        
-        st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
-        
-        state.selected_quota_paths = st.multiselect("Select share to manage in Universal Manager", 
-                                                    options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
-                                                    max_selections=1)
-    else:
+    if not filt:
         st.info("No records match the current filter.")
+        return
+
+    def render_quota_table(quota_list, key_suffix=""):
+        page = st.number_input(f"Page {key_suffix}", min_value=1, value=1, key=f"page_{key_suffix}")
+        items, total = paginate_list(quota_list, page)
+        
+        if items:
+            df_data = []
+            for q in items:
+                df_data.append({
+                    "Share": q.path.split("/")[-1],
+                    "Protocol": state.protocol_map.get(q.path, "-"),
+                    "Zone": q.access_zone,
+                    "Path": q.path,
+                    "Usage %": f"{q.usage_percent:.1f}%",
+                    "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+                })
+            
+            st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+            
+            selected = st.multiselect("Select share to manage in Universal Manager", 
+                                        options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
+                                        max_selections=1,
+                                        key=f"sel_{key_suffix}")
+            if selected:
+                state.selected_quota_paths = selected
+        else:
+            st.info("No items on this page.")
+
+    if group_by_zone:
+        zones_in_filt = sorted(list(set(q.access_zone for q in filt)))
+        for z in zones_in_filt:
+            with st.expander(f"📁 Zone: {z}", expanded=True):
+                zone_items = [q for q in filt if q.access_zone == z]
+                st.caption(f"{len(zone_items)} quotas in this zone")
+                render_quota_table(zone_items, key_suffix=z)
+    else:
+        render_quota_table(filt, key_suffix="all")
 
 
 def modify_tab():
