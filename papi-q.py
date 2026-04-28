@@ -157,9 +157,6 @@ from typing import Dict, Any, Optional
 
 
 
-    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, 
-    DEFAULT_CLUSTERS_FILE, ensure_config_dir
-)
 
 
 def load_config() -> Dict[str, Any]:
@@ -830,12 +827,7 @@ from urllib.parse import urlparse
 
 
 
-    filter_quotas, get_top_offenders, paginate_list, 
-    status_badge, color_for_status, bytes_to_gb
-)
 
-    render_dynamic_grid, render_snapshot_viewer, render_acl_viewer
-)
 
 
 st.set_page_config(page_title="SmartQuota Manager", page_icon="📊", layout="wide")

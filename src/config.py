@@ -7,10 +7,7 @@ from typing import Dict, Any, Optional
 from src.logger import log_info, log_error, log_warning
 
 
-from src.constants import (
-    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, 
-    DEFAULT_CLUSTERS_FILE, ensure_config_dir
-)
+from src.constants import DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, DEFAULT_CLUSTERS_FILE, ensure_config_dir
 
 
 def load_config() -> Dict[str, Any]:

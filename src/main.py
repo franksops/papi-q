@@ -10,13 +10,8 @@ from src.config import load_clusters, add_cluster, remove_cluster
 from src.api import IsilonAPI
 from src.audit import write_audit_entry, read_audit_log
 from src.logger import log_info, log_error, log_warning
-from src.utils import (
-    filter_quotas, get_top_offenders, paginate_list, 
-    status_badge, color_for_status, bytes_to_gb
-)
-from src.ui.components import (
-    render_dynamic_grid, render_snapshot_viewer, render_acl_viewer
-)
+from src.utils import filter_quotas, get_top_offenders, paginate_list, status_badge, color_for_status, bytes_to_gb
+from src.ui.components import render_dynamic_grid, render_snapshot_viewer, render_acl_viewer
 from src.ui.session import init_session, set_api_client, clear_api_client, handle_api_error
 
 st.set_page_config(page_title="SmartQuota Manager", page_icon="📊", layout="wide")
