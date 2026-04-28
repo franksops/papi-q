@@ -252,7 +252,7 @@ class IsilonAPI:
             log_warning(f"Protocol mapping failed: {e}")
         return mapping
 
-    def list_quotas(self, path: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
+    def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
@@ -260,49 +260,78 @@ class IsilonAPI:
             
             # 0.7.0 uses list_quota_quotas, older uses list_quotas
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
-            resp = method(**params)
             
+            # Try to pass zone parameter - try multiple names as SDKs vary
+            try:
+                # Attempt 1: 'zone' (common in 0.7.0+)
+                p = params.copy()
+                if access_zone and access_zone != "All": p["zone"] = access_zone
+                resp = method(**p)
+            except TypeError:
+                try:
+                    # Attempt 2: 'zones' (sometimes used for multi-zone query)
+                    p = params.copy()
+                    if access_zone and access_zone != "All": p["zones"] = access_zone
+                    resp = method(**p)
+                except TypeError:
+                    # Attempt 3: No zone parameter supported, fallback to System
+                    resp = method(**params)
+            
+            # Map with fallback zone info
+            fallback = access_zone if access_zone and access_zone != "All" else "System"
             return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        """Fetch all quotas cluster-wide and map them to their respective Access Zones."""
-        all_q, token = [], None
-        while True:
-            qs, token = self.list_quotas(path, token=token)
-            all_q.extend(qs)
-            if not token or len(all_q) > 10000: break
+        """Fetch all quotas. Iterates through all zones if access_zone is 'All' or None."""
+        all_q = []
         
-        # Enrich quotas with Zone info based on path
+        # Determine which zones to query
         zones_info = self.get_access_zones_info()
-        # Sort zones by path length descending to match most specific path first
-        # We ensure all zone paths are normalized for comparison
+        if access_zone and access_zone != "All":
+            zones_to_query = [access_zone]
+        else:
+            zones_to_query = list(zones_info.keys())
+
+        # Aggregate quotas from all zones
+        for zone in zones_to_query:
+            token = None
+            zone_quotas = []
+            while True:
+                try:
+                    qs, token = self.list_quotas(path, access_zone=zone, token=token)
+                    # Manually ensure zone is set correctly for mapping
+                    for q in qs:
+                        if q.access_zone == "System" and zone != "System":
+                            q.access_zone = zone
+                    zone_quotas.extend(qs)
+                except Exception as e:
+                    log_warning(f"Failed to fetch quotas for zone {zone}: {e}")
+                    break
+                if not token or len(zone_quotas) > 10000: break
+            all_q.extend(zone_quotas)
+        
+        # Deduplicate by ID just in case
+        unique_q = {q.id: q for q in all_q}
+        all_q = list(unique_q.values())
+
+        # Enrichment step for any that still say System but match a sub-path
         sorted_zones = []
         for name, p in zones_info.items():
             norm_p = p.rstrip("/")
             if not norm_p.startswith("/ifs"): norm_p = f"/ifs/{norm_p.lstrip('/')}"
             sorted_zones.append((name, norm_p))
-        
         sorted_zones.sort(key=lambda x: len(x[1]), reverse=True)
         
         for q in all_q:
-            # Normalize quota path for matching
-            q_path = q.path.rstrip("/")
-            if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
-            
-            # Only override if it's currently 'System' or the API didn't provide it
             if q.access_zone == "System":
+                q_path = q.path.rstrip("/")
+                if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
                 for zone_name, zone_path in sorted_zones:
-                    # Match if quota path starts with zone path
-                    # Add trailing slash check to avoid partial folder matches (e.g. /ifs/data vs /ifs/data2)
                     if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
                         q.access_zone = zone_name
                         break
-        
-        # Manual filtering if access_zone was requested
-        if access_zone and access_zone != "All":
-            all_q = [q for q in all_q if q.access_zone == access_zone]
             
         return all_q
 

@@ -171,6 +171,9 @@ def monitoring_tab():
     # 4. Filter and Group
     filt = filter_quotas(state.quotas, search, None if zone_filter == "All Zones" else zone_filter)
     
+    # Sort by usage descending by default to show offenders at top
+    filt.sort(key=lambda x: x.usage_percent, reverse=True)
+    
     st.markdown(f"**Results:** {len(filt)} Quotas")
     
     if not filt:
