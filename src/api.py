@@ -2,10 +2,15 @@
 
 import urllib3
 import importlib
+import pkgutil
+import os
+import re
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 from datetime import datetime
+from urllib.parse import urlparse
+from src.logger import log_info, log_error, log_warning
 
 # Suppress urllib3 warnings for self-signed certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -78,18 +83,29 @@ class IsilonAPI:
     def format_url(input_url: str) -> str:
         """Construct a full OneFS API URL from IP, hostname, or partial URL."""
         if not input_url: return ""
-        url = input_url.strip().lower()
-        if not url.startswith("http"):
+        # Clean the input: remove leading slashes/colons and browser paths
+        url = input_url.strip()
+        url = re.sub(r'^[:/]+', '', url)
+        
+        if not url.lower().startswith("http"):
             url = f"https://{url}"
-        if ":" not in url.split("//")[-1]:
-            url = f"{url}:8080"
-        return url
+        
+        # Parse and reconstruct to ensure only scheme://host:port
+        p = urlparse(url)
+        host_part = p.netloc or p.path.split('/')[0]
+        
+        # Ensure port 8080 if none specified
+        if ":" not in host_part:
+            host_part = f"{host_part}:8080"
+            
+        return f"{p.scheme or 'https'}://{host_part}"
 
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = self.format_url(cluster_url)
         self.verify_ssl = verify_ssl
+        
         try:
-            # Try both possible package names
+            # 1. Resolve base SDK package
             try:
                 import isi_sdk as sdk
             except ImportError:
@@ -97,56 +113,64 @@ class IsilonAPI:
             
             self.sdk = sdk
             self._models = {}
+            
+            # 2. Universal Component Discovery
+            def find_component(name_patterns: List[str]):
+                """Search package submodules for a class matching patterns."""
+                # Check top-level first
+                for p in name_patterns:
+                    if hasattr(sdk, p): return getattr(sdk, p)
+                
+                # Walk subpackages
+                for loader, mod_name, is_pkg in pkgutil.walk_packages(sdk.__path__, sdk.__name__ + '.'):
+                    if 'models' in mod_name or 'api' in mod_name:
+                        try:
+                            m = importlib.import_module(mod_name)
+                            for p in name_patterns:
+                                if hasattr(m, p): return getattr(m, p)
+                        except: continue
+                return None
 
-            # --- DEEP DISCOVERY ---
-            # We search for quota_entry.py and derive the model package from its location
-            import os
-            import importlib
+            # Find Models
+            self._models["entry"] = find_component(["QuotaEntry", "QuotaQuotaEntry"])
+            self._models["limits"] = find_component(["QuotaLimits"])
+            self._models["quota"] = find_component(["QuotaQuota", "QuotaQuotaCreateParams"])
             
-            search_base = os.path.dirname(sdk.__file__)
-            target_file = "quota_entry.py"
-            model_pkg_path = None
+            if not all(self._models.values()):
+                missing = [k for k, v in self._models.items() if not v]
+                raise ImportError(f"Missing SDK Models: {missing}")
 
-            for root, dirs, files in os.walk(search_base):
-                if target_file in files:
-                    # Found it! Now convert filesystem path to python module path
-                    # e.g. .../isilon_sdk/v9_12_0/models -> isilon_sdk.v9_12_0.models
-                    rel_path = os.path.relpath(root, os.path.dirname(search_base))
-                    model_pkg_path = rel_path.replace(os.sep, ".")
-                    break
-            
-            if not model_pkg_path:
-                raise ImportError(f"Could not locate {target_file} inside {sdk.__name__}")
+            # Find APIs & Config
+            ConfigClass = find_component(["Configuration"])
+            ApiClientClass = find_component(["ApiClient"])
+            QuotaApiClass = find_component(["QuotaApi"])
+            SharesApiClass = find_component(["SharesApi"])
+            NamespaceApiClass = find_component(["NamespaceApi"])
+            ProtocolsApiClass = find_component(["ProtocolsApi"])
+            SnapshotApiClass = find_component(["SnapshotApi"])
 
-            # Dynamically import the discovered models
-            m_entry = importlib.import_module(f"{model_pkg_path}.quota_entry")
-            m_limits = importlib.import_module(f"{model_pkg_path}.quota_limits")
-            m_quota = importlib.import_module(f"{model_pkg_path}.quota_quota")
+            if not all([ConfigClass, ApiClientClass, QuotaApiClass]):
+                raise ImportError("Could not locate core SDK API classes")
+
+            # Initialize
+            self.configuration = ConfigClass()
+            self.configuration.host = self.cluster_url
+            self.configuration.username = username
+            self.configuration.password = password
+            self.configuration.verify_ssl = self.verify_ssl
             
-            self._models = {
-                "entry": getattr(m_entry, "QuotaEntry"),
-                "limits": getattr(m_limits, "QuotaLimits"),
-                "quota": getattr(m_quota, "QuotaQuota")
-            }
-            
-            log_info(f"SDK Discovery Successful: using models from {model_pkg_path}")
+            api_client = ApiClientClass(self.configuration)
+            self.quota_api = QuotaApiClass(api_client)
+            self.shares_api = SharesApiClass(api_client) if SharesApiClass else None
+            self.namespaces_api = NamespaceApiClass(api_client) if NamespaceApiClass else None
+            self.protocols_api = ProtocolsApiClass(api_client) if ProtocolsApiClass else None
+            self.snapshot_api = SnapshotApiClass(api_client) if SnapshotApiClass else None
+
+            log_info(f"SDK connected to {self.cluster_url} for user {username}")
 
         except Exception as e:
-            log_error("SDK Model Discovery Failed", e)
+            log_error("SDK Initialization Failed", e)
             raise ImportError(f"SDK Error: {e}")
-        
-        self.configuration = self.sdk.Configuration()
-        self.configuration.host = self.cluster_url
-        self.configuration.username = username
-        self.configuration.password = password
-        self.configuration.verify_ssl = self.verify_ssl
-        
-        api_client = self.sdk.ApiClient(self.configuration)
-        self.quota_api = self.sdk.QuotaApi(api_client)
-        self.shares_api = self.sdk.SharesApi(api_client)
-        self.namespaces_api = self.sdk.NamespaceApi(api_client)
-        self.protocols_api = self.sdk.ProtocolsApi(api_client)
-        self.snapshot_api = self.sdk.SnapshotApi(api_client)
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
         # Robust mapping for nested PAPI objects
@@ -165,6 +189,7 @@ class IsilonAPI:
 
     def get_protocol_mapping(self, access_zone: str = "System") -> Dict[str, str]:
         mapping = {}
+        if not self.shares_api or not self.protocols_api: return mapping
         try:
             smb = self.shares_api.list_smb_shares(zone=access_zone)
             for s in smb.shares: mapping[s.path] = "SMB"
@@ -243,6 +268,7 @@ class IsilonAPI:
 
     def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
         """List snapshots, sorted newest first."""
+        if not self.snapshot_api: return []
         try:
             resp = self.snapshot_api.list_snapshots(path=path)
             snaps = [{
@@ -256,6 +282,7 @@ class IsilonAPI:
 
     def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
         """Fetch ACL from Namespace API with explicit zone support."""
+        if not self.namespaces_api: return {"error": "Namespace API not available"}
         try:
             ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
             resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
@@ -263,6 +290,7 @@ class IsilonAPI:
         except Exception as e: return {"error": str(e)}
 
     def list_access_zones(self) -> List[str]:
+        if not self.namespaces_api: return ["System"]
         try:
             resp = self.namespaces_api.get_access_zones()
             return [z.name for z in resp.access_zones]
