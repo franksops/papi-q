@@ -56,10 +56,15 @@ def run_command(cmd, shell=False):
         return False
 
 def bootstrap():
-    """Ensure all system and python dependencies are met."""
-    system = platform.system().lower()
-    missing_deps = []
+    """Ensure all system and python dependencies are met using a managed venv."""
+    config_dir = Path.home() / ".papi-q"
+    venv_dir = config_dir / "venv"
+    config_dir.mkdir(parents=True, exist_ok=True)
     
+    # Check if we are already running in our managed venv
+    in_venv = sys.prefix == str(venv_dir)
+    
+    missing_deps = []
     try:
         import streamlit
         import isi_sdk
@@ -72,29 +77,31 @@ def bootstrap():
         return True
 
     print(f"\\n[!] Missing Python dependencies: {', '.join(missing_deps)}")
-    choice = input("Would you like to attempt auto-installation? [y/N]: ").lower()
-    if choice != 'y':
-        print("Manual install required: pip install " + " ".join(missing_deps))
+    
+    # If not in venv, try to create/use it
+    if not in_venv:
+        if not venv_dir.exists():
+            print(f"[*] Creating virtual environment in {venv_dir}...")
+            if not run_command([sys.executable, "-m", "venv", str(venv_dir)]):
+                print("Error: Failed to create virtual environment.")
+                sys.exit(1)
+        
+        venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
+        print("[*] Installing dependencies into virtual environment...")
+        if not run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"]):
+            pass # Continue anyway
+            
+        if not run_command([venv_python, "-m", "pip", "install"] + missing_deps):
+            # Fallback for some systems that still require it even in venv
+            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + missing_deps)
+
+        print("\\n[+] Environment ready. Re-launching...\\n")
+        os.execv(venv_python, [venv_python] + sys.argv)
+    else:
+        # We are IN the venv but imports failed? Something is wrong.
+        print(f"Error: Dependencies missing inside virtual environment. Try: {sys.executable} -m pip install " + " ".join(missing_deps))
         sys.exit(1)
 
-    if system == "darwin": # macOS
-        if shutil.which("brew"):
-            print("[*] Ensuring python3 is available via brew...")
-            run_command(["brew", "install", "python"])
-    
-    elif system == "linux":
-        if shutil.which("apt-get"):
-            run_command(["sudo", "apt-get", "update", "-y"])
-            run_command(["sudo", "apt-get", "install", "-y", "python3-pip"])
-        elif shutil.which("dnf"):
-            run_command(["sudo", "dnf", "install", "-y", "python3-pip"])
-
-    print("[*] Installing python dependencies via pip...")
-    pip_cmd = [sys.executable, "-m", "pip", "install"] + missing_deps
-    if not run_command(pip_cmd):
-        run_command(pip_cmd + ["--user"])
-
-    print("\\n[+] Done. Re-launching...\\n")
     return True
 
 if "__main__" == __name__ and not os.environ.get("STREAMLIT_RUNNING"):
