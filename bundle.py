@@ -29,14 +29,16 @@ import os
 import subprocess
 import platform
 import shutil
-from typing import Dict, Any, Optional, List, Tuple
-from dataclasses import dataclass
-from enum import Enum
+import glob
 import json
 import csv
 import time
+from typing import Dict, Any, Optional, List, Tuple
+from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Python Version Check
 if sys.version_info < (3, 8):
@@ -116,6 +118,7 @@ except ImportError:
                 content = re.sub(r'^import .* as state$', 'from streamlit import session_state as state', content, flags=re.MULTILINE)
                 content = re.sub(r'^from src import .*$', '', content, flags=re.MULTILINE)
                 content = re.sub(r'^from audit import .*$', '', content, flags=re.MULTILINE)
+                content = re.sub(r'^from utils import .*$', '', content, flags=re.MULTILINE)
                 content = re.sub(r'^"""[\s\S]*?"""', '', content, count=1)
                 
                 out.write(f"\n# --- Source: {file_path} ---\n")

@@ -47,10 +47,10 @@ def login_section():
             st.sidebar.error("Missing fields")
             return
         
-        # Robust name derivation
         try:
+            # Robust name derivation
             p = urlparse(url)
-            host = p.hostname or url.split("//")[-1].split(":")[0]
+            host = p.hostname or url.split("//")[-1].split(":")[0] or "unknown_cluster"
             display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
             
             api = IsilonAPI(url, user, pwd, verify_ssl=not skip_ssl)
@@ -157,21 +157,21 @@ def modify_tab():
     
     with t1:
         try:
-            raw = api.quota_api.get_quota_entry(quota.id).to_dict()
+            raw = api.get_raw_quota(quota.id)
             with st.form(f"u_{quota.id}"):
                 payload = render_dynamic_grid(raw, f"e_{quota.id}")
                 st.divider()
                 if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary"):
                     if payload:
                         updated = api.update_quota_dynamic(quota.id, payload)
-                        new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0))
-                        write_audit_entry(state.admin_user, state.selected_cluster, "UPDATE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
+                        keys = ", ".join(payload.keys())
+                        new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0)) if "limits" in payload else quota.hard_limit_gb
+                        write_audit_entry(state.admin_user, state.selected_cluster, f"UPDATE ({keys})", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
                         st.success("Updated successfully.")
                         state.quotas_loaded = False
                         st.rerun()
             
             with st.expander("🗑️ Danger Zone"):
-                st.error("Permanent Deletion")
                 if st.text_input("Type 'DELETE'", key=f"d_tx_{quota.id}") == "DELETE":
                     if st.button("CONFIRM DELETE", key=f"d_bt_{quota.id}"):
                         api.delete_quota(quota.id)

@@ -1,7 +1,7 @@
 """Session state management for SmartQuota Manager."""
 
 import streamlit as st
-from typing import Optional, Any
+from typing import Any
 
 
 def init_session() -> None:

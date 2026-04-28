@@ -12,9 +12,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class Status(Enum):
     """Quota status based on usage percentage."""
-    HEALTHY = "healthy"      # <80%
-    WARNING = "warning"      # 80-95%
-    CRITICAL = "critical"    # >95%
+    HEALTHY = "healthy"
+    WARNING = "warning"
+    CRITICAL = "critical"
 
 
 @dataclass
@@ -32,8 +32,7 @@ class QuotaEntry:
     
     @property
     def usage_percent(self) -> float:
-        if self.hard_limit_bytes == 0:
-            return 0.0
+        if not self.hard_limit_bytes: return 0.0
         return (self.usage_bytes / self.hard_limit_bytes) * 100
     
     @property
@@ -76,14 +75,10 @@ class IsilonAPI:
     
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = cluster_url.rstrip("/")
-        self.username = username
-        self.password = password
-        self.verify_ssl = verify_ssl
-        
         try:
             import isi_sdk
             self.sdk = isi_sdk
-            # Dynamically load models
+            # Dynamically load models based on version
             try:
                 from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
                 from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
@@ -99,9 +94,9 @@ class IsilonAPI:
         
         self.configuration = self.sdk.Configuration()
         self.configuration.host = self.cluster_url
-        self.configuration.username = self.username
-        self.configuration.password = self.password
-        self.configuration.verify_ssl = self.verify_ssl
+        self.configuration.username = username
+        self.configuration.password = password
+        self.configuration.verify_ssl = verify_ssl
         
         api_client = self.sdk.ApiClient(self.configuration)
         self.quota_api = self.sdk.QuotaApi(api_client)
@@ -112,13 +107,11 @@ class IsilonAPI:
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
         return QuotaEntry(
-            id=q.id,
-            path=q.path,
+            id=q.id, path=q.path,
             hard_limit_bytes=q.limits.hard or 0,
             soft_limit_bytes=q.limits.soft or 0,
             usage_bytes=q.usage.inclusive or 0,
-            users=q.users or [],
-            groups=q.groups or [],
+            users=q.users or [], groups=q.groups or [],
             access_zone=q.zone or "System",
             comment=getattr(q, "comment", ""),
         )
@@ -153,8 +146,15 @@ class IsilonAPI:
             if not token or len(all_q) > 10000: break
         return all_q
 
+    def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
+        """Fetch raw quota dictionary for the Dynamic Grid."""
+        try:
+            resp = self.quota_api.get_quota_entry(quota_id)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e:
+            raise RuntimeError(f"Fetch failed: {e}")
+
     def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Update any quota field dynamically. Handles nested limits object."""
         try:
             update_obj = self._models["entry"]()
             for k, v in payload.items():
@@ -165,23 +165,22 @@ class IsilonAPI:
                     setattr(update_obj, k, lims)
                 elif hasattr(update_obj, k):
                     setattr(update_obj, k, v)
-            
             resp = self.quota_api.update_quota_entry(quota_id, update_obj)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e:
             raise RuntimeError(f"Update Failed: {e}")
 
-    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, include_snapshots: bool = False) -> str:
-        """Create new quota with comprehensive parameters."""
+    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, snapshots: bool = False) -> str:
+        """Create new quota. Only sets non-zero limits to avoid unintended overwrites."""
         try:
-            q_limits = self._models["limits"](
-                hard=int(round(limits.get("hard", 0) * (1024**3))),
-                soft=int(round(limits.get("soft", 0) * (1024**3))),
-                advisory=int(round(limits.get("advisory", 0) * (1024**3)))
-            )
+            q_limits = self._models["limits"]()
+            if limits.get("hard"): q_limits.hard = int(round(limits["hard"] * (1024**3)))
+            if limits.get("soft"): q_limits.soft = int(round(limits["soft"] * (1024**3)))
+            if limits.get("advisory"): q_limits.advisory = int(round(limits["advisory"] * (1024**3)))
+            
             q_body = self._models["quota"](
                 path=path, type=q_type, limits=q_limits, 
-                enforced=enforced, include_snapshots=include_snapshots, zone=access_zone
+                enforced=enforced, include_snapshots=snapshots, zone=access_zone
             )
             resp = self.quota_api.create_quota(q_body)
             return resp.id
@@ -196,13 +195,16 @@ class IsilonAPI:
             raise RuntimeError(f"Delete Failed: {e}")
 
     def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
+        """List snapshots, sorted newest first."""
         try:
             resp = self.snapshot_api.list_snapshots(path=path)
-            return [{
-                "id": s.id, "name": s.name, 
+            snaps = [{
+                "id": s.id, "name": s.name, "created_epoch": s.created,
                 "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
                 "size": getattr(s, "size", 0)
             } for s in resp.snapshots]
+            snaps.sort(key=lambda x: x["created_epoch"], reverse=True)
+            return snaps
         except Exception: return []
 
     def get_acl_for_path(self, path: str) -> Dict[str, Any]:
