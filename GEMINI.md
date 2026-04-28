@@ -5,6 +5,8 @@ SmartQuota Manager is a specialized administrative tool for Dell PowerScale (Isi
 
 ### 🏛️ Core Architecture
 - **Source-to-Bundle Workflow**: Development occurs in the `src/` directory. Production distribution is a single-file bootstrapper (`papi-q.py`).
+- **Managed Runtime**: The bootstrapper automatically manages a dedicated virtual environment in `~/.papi-q/venv`.
+- **Python Stability**: The bootstrapper proactively discovers and prefers stable Python versions (3.11-3.13) to ensure compatibility with legacy SDKs.
 - **Backend**: Dell PowerScale Platform API (PAPI) via the official `isilon-sdk`.
 - **Frontend**: Streamlit-based SPA (Single Page Application).
 - **State**: Volatile session management via `streamlit.session_state`.
@@ -26,6 +28,7 @@ SmartQuota Manager is a specialized administrative tool for Dell PowerScale (Isi
 
 ### 3. API & Data Handling
 - Use the `IsilonAPI` wrapper in `src/api.py` for all cluster interactions.
+- **SDK Compatibility**: The API wrapper and bootstrapper support both `isi_sdk` and `isilon_sdk` module names to handle varied installation environments.
 - **Typing**: Use the `QuotaEntry` dataclass for quota objects.
 - **Units**: All storage values should be processed in bytes internally and converted to GB/TB for UI display using `src.utils`.
 - **Security**: Credentials must never be persisted. Only store the API client in `session_state`.

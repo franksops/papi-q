@@ -236,6 +236,3 @@ def export_tab():
                 data = [ {**q.to_dict(), "Protocol": mapping.get(q.path, "-")} for q in qs ]
                 st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
             except Exception as e: st.error(e)
-
-
-if __name__ == "__main__": main()

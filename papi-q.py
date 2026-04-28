@@ -1101,9 +1101,6 @@ def export_tab():
             except Exception as e: st.error(e)
 
 
-if __name__ == "__main__": main()
-
-
 # --- ENTRY POINT ---
 if __name__ == "__main__":
     main()
