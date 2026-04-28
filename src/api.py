@@ -208,16 +208,31 @@ class IsilonAPI:
             comment=getattr(q, "comment", ""),
         )
 
-    def get_protocol_mapping(self, access_zone: str = "System") -> Dict[str, str]:
+    def get_protocol_mapping(self) -> Dict[str, str]:
+        """Fetch all SMB shares and NFS exports from ALL zones and map paths to protocols."""
         mapping = {}
-        if not self.shares_api or not self.protocols_api: return mapping
         try:
-            smb = self.shares_api.list_smb_shares(zone=access_zone)
-            for s in smb.shares: mapping[s.path] = "SMB"
-            nfs = self.protocols_api.list_nfs_exports(zone=access_zone)
-            for e in nfs.exports:
-                for p in e.paths: mapping[p] = (mapping.get(p, "") + ", NFS").lstrip(", ")
-        except Exception: pass
+            zones = self.list_access_zones()
+            for zone in zones:
+                # Map SMB Shares
+                if self.shares_api:
+                    try:
+                        smb = self.shares_api.list_smb_shares(zone=zone)
+                        for s in smb.shares:
+                            mapping[s.path] = "SMB"
+                    except: pass
+                
+                # Map NFS Exports
+                if self.protocols_api:
+                    try:
+                        nfs = self.protocols_api.list_nfs_exports(zone=zone)
+                        for e in nfs.exports:
+                            for p in e.paths:
+                                current = mapping.get(p, "")
+                                mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
+                    except: pass
+        except Exception as e:
+            log_warning(f"Protocol mapping failed: {e}")
         return mapping
 
     def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:

@@ -130,46 +130,66 @@ def dashboard():
 def monitoring_tab():
     st.header("Cluster Overview")
     api = state.api_client
+    
+    # 1. Data Retrieval
     if not state.quotas_loaded:
-        with st.spinner("Loading..."):
+        with st.spinner("Fetching cluster-wide inventory..."):
             try:
-                state.quotas = api.list_quotas(limit=500)[0]
+                state.quotas = api.list_all_quotas()
+                state.protocol_map = api.get_protocol_mapping()
+                state.zones = api.list_access_zones()
                 state.quotas_loaded = True
             except Exception as e:
-                if not handle_api_error(e): st.error(e)
+                if not handle_api_error(e): st.error(f"Inventory Failed: {e}")
                 return
 
+    # 2. Dashboard KPIs
     off = get_top_offenders(state.quotas)
     c1, c2, c3 = st.columns(3)
     with c1:
-        st.markdown("<h4 style='color:#D72638'>🔴 Critical</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#D72638'>🔴 Critical (>95%)</h4>", unsafe_allow_html=True)
         for i in off["critical"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
     with c2:
-        st.markdown("<h4 style='color:#F58513'>🟡 Warning</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#F58513'>🟡 Warning (>80%)</h4>", unsafe_allow_html=True)
         for i in off["warning"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
     with c3:
-        st.markdown("<h4 style='color:#006837'>🟢 Notice</h4>", unsafe_allow_html=True)
+        st.markdown("<h4 style='color:#006837'>🟢 Notice (>70%)</h4>", unsafe_allow_html=True)
         for i in off["notice"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
 
     st.divider()
-    sc, zc = st.columns(2)
-    search = sc.text_input("Search Name")
-    zone = zc.selectbox("Zone", ["All"] + api.list_access_zones())
+
+    # 3. Filtering & Search
+    sc, zc = st.columns([2, 1])
+    search = sc.text_input("Search (Path or Share Name)")
+    zone_filter = zc.selectbox("Access Zone Filter", ["All Zones"] + sorted(state.get("zones", ["System"])))
     
-    filt = filter_quotas(state.quotas, search, zone)
+    # 4. Filter and Group
+    filt = filter_quotas(state.quotas, search, None if zone_filter == "All Zones" else zone_filter)
+    
+    st.markdown(f"**Results:** {len(filt)} Quotas")
+    
     page = st.number_input("Page", min_value=1, value=1)
     items, total = paginate_list(filt, page)
     
     if items:
-        df = pd.DataFrame([{
-            "Share": q.path.split("/")[-1], "Zone": q.access_zone, "Path": q.path,
-            "Usage %": f"{q.usage_percent:.1f}%", "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
-        } for q in items])
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        state.selected_quota_paths = st.multiselect("Select share to manage", 
+        df_data = []
+        for q in items:
+            df_data.append({
+                "Share": q.path.split("/")[-1],
+                "Protocol": state.protocol_map.get(q.path, "-"),
+                "Zone": q.access_zone,
+                "Path": q.path,
+                "Usage %": f"{q.usage_percent:.1f}%",
+                "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+            })
+        
+        st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
+        
+        state.selected_quota_paths = st.multiselect("Select share to manage in Universal Manager", 
                                                     options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
                                                     max_selections=1)
-    else: st.info("No records.")
+    else:
+        st.info("No records match the current filter.")
 
 
 def modify_tab():

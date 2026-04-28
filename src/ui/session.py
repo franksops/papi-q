@@ -18,7 +18,8 @@ def init_session() -> None:
         "quotas": [],
         "quotas_loaded": False,
         "selected_quota_paths": [],
-        "confirm_shutdown": False
+        "confirm_shutdown": False,
+        "protocol_map": {}
     }
     for key, val in defaults.items():
         if key not in st.session_state:
