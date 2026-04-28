@@ -15,6 +15,8 @@ This file tracks improvements, bug fixes, and technical debt removal.
 ### UI & technical Debt (`src/main.py`, `src/ui/session.py`, `src/ui/components.py`)
 - **Name Derivation**: Implemented `urllib.parse` for cluster hostname derivation, with a multi-stage fallback to handle malformed IPs and URLs gracefully.
 - **Encapsulation**: Replaced direct SDK calls in the UI with a refined `get_raw_quota` API wrapper, ensuring uniform error handling.
+- **Efficiency Fix**: Optimized `audit_tab` and `export_tab` to avoid redundant DataFrame creation, improving performance on large datasets.
+- **State Integrity**: Performed a final purge of legacy state keys and fixed a dictionary lookup mismatch in `src/ui/session.py`.
 - **Pure Component Policy**: Logic for status badges and formatting is now strictly centralized in `utils.py`, with all redundant UI-layer formatters and unused functions fully purged.
 
 ### Verification

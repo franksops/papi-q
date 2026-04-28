@@ -803,7 +803,6 @@ def login_section():
             return
         
         try:
-            # Robust name derivation
             p = urlparse(url)
             host = p.hostname or url.split("//")[-1].split(":")[0] or "unknown_cluster"
             display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
@@ -836,12 +835,15 @@ def sidebar_tools():
                 st.rerun()
 
 
-def dashboard():
+def main():
     if not state.api_client:
-        st.title("📊 SmartQuota Manager")
-        st.info("Please login from the sidebar.")
-        return
+        login_section()
+    else:
+        sidebar_tools()
+        dashboard()
 
+
+def dashboard():
     tabs = st.tabs(["📈 Dashboard", "🔧 Universal Manager", "➕ Provision", "📜 Audit History", "📥 Export"])
     
     with tabs[0]: monitoring_tab()
@@ -927,8 +929,8 @@ def modify_tab():
                         st.rerun()
             
             with st.expander("🗑️ Danger Zone"):
-                if st.text_input("Type 'DELETE'", key=f"d_tx_{quota.id}") == "DELETE":
-                    if st.button("CONFIRM DELETE", key=f"d_bt_{quota.id}"):
+                if st.text_input("Type 'DELETE' to confirm decommissioning", key=f"d_tx_{quota.id}") == "DELETE":
+                    if st.button("CONFIRM PERMANENT DELETE", key=f"d_bt_{quota.id}", type="primary"):
                         api.delete_quota(quota.id)
                         write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
                         state.quotas_loaded = False
@@ -973,8 +975,9 @@ def audit_tab():
     st.caption("Combined daily logs for the current cluster.")
     entries = read_audit_log(state.selected_cluster)
     if entries:
-        st.dataframe(pd.DataFrame(entries), hide_index=True, use_container_width=True)
-        st.download_button("Download CSV", pd.DataFrame(entries).to_csv(index=False), f"audit_{state.selected_cluster}.csv")
+        audit_df = pd.DataFrame(entries)
+        st.dataframe(audit_df, hide_index=True, use_container_width=True)
+        st.download_button("Download CSV History", audit_df.to_csv(index=False), f"audit_{state.selected_cluster}.csv")
     else: st.info("No logs found.")
 
 
@@ -985,21 +988,10 @@ def export_tab():
             try:
                 qs = state.api_client.list_all_quotas()
                 mapping = state.api_client.get_protocol_mapping()
-                data = []
-                for q in qs:
-                    d = q.to_dict()
-                    d["Protocol"] = mapping.get(q.path, "-")
-                    data.append(d)
-                st.download_button("Download", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
+                data = [ {**q.to_dict(), "Protocol": mapping.get(q.path, "-")} for q in qs ]
+                st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
             except Exception as e: st.error(e)
 
-
-def main():
-    if not state.api_client:
-        login_section()
-    else:
-        sidebar_tools()
-    dashboard()
 
 if __name__ == "__main__": main()
 
