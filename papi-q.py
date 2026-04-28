@@ -41,19 +41,27 @@ def bootstrap():
     # Check if we are already running in our managed venv
     in_venv = sys.prefix == str(venv_dir)
     
-    missing_deps = []
-    try:
-        import streamlit
-        import isi_sdk
-        import pandas
-        import urllib3
-    except ImportError:
-        missing_deps = ["isilon-sdk", "streamlit", "pandas", "urllib3", "python-dotenv"]
+    deps = {
+        "streamlit": "streamlit",
+        "isi_sdk": "isilon-sdk",
+        "pandas": "pandas",
+        "urllib3": "urllib3",
+        "dotenv": "python-dotenv"
+    }
+    
+    missing_pkg = []
+    for mod, pkg in deps.items():
+        try:
+            __import__(mod)
+        except ImportError as e:
+            missing_pkg.append(pkg)
+            if in_venv:
+                print(f"[*] Dependency Error: Failed to import {mod} ({pkg}) -> {e}")
 
-    if not missing_deps:
+    if not missing_pkg:
         return True
 
-    print(f"\n[!] Missing Python dependencies: {', '.join(missing_deps)}")
+    print(f"\n[!] Missing Python dependencies: {', '.join(missing_pkg)}")
     
     # If not in venv, try to create/use it
     if not in_venv:
@@ -65,18 +73,17 @@ def bootstrap():
         
         venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
         print("[*] Installing dependencies into virtual environment...")
-        if not run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"]):
-            pass # Continue anyway
+        run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
             
-        if not run_command([venv_python, "-m", "pip", "install"] + missing_deps):
-            # Fallback for some systems that still require it even in venv
-            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + missing_deps)
+        if not run_command([venv_python, "-m", "pip", "install"] + missing_pkg):
+            # Fallback for some systems
+            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + missing_pkg)
 
         print("\n[+] Environment ready. Re-launching...\n")
         os.execv(venv_python, [venv_python] + sys.argv)
     else:
-        # We are IN the venv but imports failed? Something is wrong.
-        print(f"Error: Dependencies missing inside virtual environment. Try: {sys.executable} -m pip install " + " ".join(missing_deps))
+        print(f"\n[!] Critical: Dependencies missing inside virtual environment.")
+        print(f"Try manual fix: {sys.executable} -m pip install " + " ".join(missing_pkg))
         sys.exit(1)
 
     return True
