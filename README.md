@@ -1,282 +1,119 @@
-# SmartQuota Manager for Dell PowerScale
+# 📊 SmartQuota Manager for Dell PowerScale
 
-A Streamlit-based management tool for monitoring and modifying SmartQuotas across multiple Dell PowerScale (OneFS) clusters.
+**SmartQuota Manager** is a professional-grade, high-performance management suite designed for Storage Administrators to monitor and manage Dell PowerScale (Isilon) clusters running **OneFS 9.12.0.1**. It provides a 360-degree view of filesystem objects, including Quotas, Snapshots, and ACLs.
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![Streamlit](https://img.shields.io/badge/streamlit-1.32+-orange.svg)](https://streamlit.io/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![OneFS](https://img.shields.io/badge/OneFS-9.12.0.1-green.svg)](https://www.dell.com/support/manuals/en-us/isilon-onefs/)
 
-## Features
+---
 
-- **Multi-cluster support**: Manage 3-4+ clusters from a single interface
-- **Quota monitoring**: Real-time usage percentages with visual status indicators
-- **Quick search**: Find shares by name or access zone
-- **Top offenders**: Highlight shares exceeding usage thresholds (>90%, >80%, >70%)
-- **Audit logging**: All modifications logged to CSV for compliance
-- **Simple workflow**: Login → Find share → Adjust quota → Done
+## 🚀 Key Features
 
-## Installation
+- **Single-File Distribution**: Run the entire app from a single self-contained file: `papi-q.py`.
+- **Universal Object Manager**: A dynamic property grid that allows you to view and modify *any* API-exposed quota property.
+- **Full Quota Lifecycle (CRUD)**: Create, Read, Update, and Delete quotas directly from the UI.
+- **Filesystem Insights**:
+    - **Snapshot Viewer**: View all snapshots associated with a specific path.
+    - **ACL Inspector**: Detailed view of Owner, Group, and Access Control Entries (ACEs).
+- **Multi-Cluster Support**: Manage 6+ clusters with easy switching or custom URL entry.
+- **Bulk Export**: Generate human-readable CSV reports for all quotas, filtered by Access Zone or Protocol (SMB/NFS).
+- **Audit Logging**: Comprehensive CSV logging of all administrative actions for compliance.
+- **Universal Bootstrapper**: Automated environment setup for macOS (Homebrew) and Linux (apt/dnf).
 
-### Prerequisites
+---
 
-- **Python 3.8+** (required for `asyncio` and modern typing)
-- **Dell PowerScale (OneFS) cluster** with PAPI enabled on port 8080
-- **Active Directory or local cluster accounts** for authentication
-- **Network access** to your PowerScale clusters
+## 📦 Installation & Setup
 
-### Quick Setup (Recommended)
-
-Run the automated setup script (works on macOS and Linux):
+### The Universal Way (Recommended)
+You don't need to manually install dependencies or set up virtual environments. Simply download `papi-q.py` and run it:
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+python3 papi-q.py
 ```
 
-This script will:
-- Check Python version (requires 3.8+)
-- Create a virtual environment
-- Install all dependencies
-
-### Manual Setup
-
-```bash
-# Clone the repository
-git clone https://github.com/franksops/papi-q.git
-cd papi-q
-
-# Create and activate virtual environment
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-### Dependencies
-
-| Package | Version | Purpose |
-|---------|---------|----------|
-| isilon-sdk | 0.7.0 | Dell PowerScale OneFS API client |
-| streamlit | >=1.32.0 | Web interface framework |
-| pandas | >=2.0.0 | Data manipulation and display |
-| urllib3 | >=2.0.0 | HTTP client for API communication |
-| python-dotenv | >=1.0.0 | Environment variable management |
+**What happens next?**
+1. **OS Detection**: The script identifies if you are on macOS or Linux.
+2. **System Bootstrap**: It checks for system-level requirements and offers to install them (e.g., `brew install python` or `apt install python3-pip`).
+3. **Python Bootstrap**: It automatically installs `isilon-sdk`, `streamlit`, `pandas`, and other requirements.
+4. **Auto-Launch**: The Streamlit web interface launches automatically.
 
 ---
 
-## Configuration
+## 🔐 Authentication
 
-The application creates a `~/.papi-q/` directory on first run with configuration files.
-
-### Configuration Files
-
-#### clusters.json
-
-Cluster definitions (API endpoints). This file is **required** before you can connect.
-
-**Default location**: `~/.papi-q/clusters.json`
-
-**Format**:
-```json
-{
-  "cluster_name": "https://cluster-fqdn.local:8080",
-  "cluster_prod": "https://isilon-prod.example.com:8080",
-  "cluster_dr": "https://isilon-dr.example.com:8080"
-}
-```
-
-**How to add clusters**:
-
-1. **Via UI**: Click "Cluster Management" in the sidebar → Add each cluster
-2. **Direct edit**: Edit `~/.papi-q/clusters.json` (restart app after changes)
-3. **Bulk setup**: Pre-populate before first run for team deployment
-
-#### config.json
-
-Global application settings with defaults shown:
-
-**Default location**: `~/.papi-q/config.json`
-
-```json
-{
-  "verify_ssl": false,
-  "log_file": "/home/username/isilon_admin_audit.csv",
-  "max_retries": 3,
-  "cache_ttl_seconds": 60
-}
-```
-
-**Configuration Options**:
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `verify_ssl` | `false` | Set `true` to enforce SSL certificate validation |
-| `log_file` | `~/isilon_admin_audit.csv` | Full path to audit log CSV file |
-| `max_retries` | `3` | Number of retry attempts for failed API calls |
-| `cache_ttl_seconds` | `60` | Cache expiration time for quota data |
-
-#### Audit Log
-
-**Default location**: `~/isilon_admin_audit.csv`
-
-All quota modifications are logged with:
-- Timestamp
-- Admin user
-- Cluster name
-- Action performed
-- Share Name
-- Path
-- Old limit (GB)
-- New limit (GB)
-
-**Sample audit entry**:
-```csv
-timestamp,admin,cluster,action,share_name,path,old_limit_gb,new_limit_gb
-2024-04-08 14:30:22,jsmith,cluster_prod,QUOTA_MODIFY,data_backup,/ifs/data/backup,500,750
-```
+1. **Cluster Selection**: Choose a pre-defined cluster from `clusters.json` or select **"Custom URL..."** to enter a manual IP/FQDN (e.g., `https://isilon.local:8080`).
+2. **Credentials**: 
+    - Supports local cluster accounts.
+    - Supports Active Directory accounts in **`domain\user`** format.
+3. **SSL**: Option to ignore SSL certificates for internal management networks.
 
 ---
 
-## Usage
+## 🗺️ Navigation & Usage
 
-```bash
-# Default (binds to 127.0.0.1 for security)
-streamlit run src/main.py
+The application is organized into 5 intuitive tabs:
 
-# On dev machine (binds to specific IP for lan access)
-streamlit run src/main.py --server.address 192.168.1.10
+### 1. 📈 Monitoring (Dashboard)
+- View **Top Offenders** categorised by usage (Critical >90%, Warning >80%).
+- Search and filter the full quota inventory by Share Name, Path, or Access Zone.
+- **Action**: Select a quota row to "focus" on it for the Universal Manager.
 
-# With custom port
-streamlit run src/main.py --server.port 8502
-```
+### 2. 🔧 Modify (Universal Object Manager)
+This is the "Swiss Army Knife" for existing quotas:
+- **Quota Settings**: An editable grid of every property returned by the API. Toggle flags, change limits, or update comments.
+- **Snapshots**: View real-time snapshot data linked to the path.
+- **Permissions**: Inspect the security descriptor (ACLs) to troubleshoot access issues.
+- **Decommission**: Securely delete the quota with a text-confirmation challenge.
 
-Then open the URL shown in your browser (default: http://127.0.0.1:8501)
+### 3. ➕ Create (Provisioning)
+- Form-based interface to create new Directory, User, Group, or Default quotas.
+- Specify paths, limits, enforcement flags, and Access Zones.
 
-### Streamlit Configuration
+### 4. 📥 Export (Reporting)
+- Generate full cluster reports.
+- Filter exports by **Access Zone** or **Protocol** (the tool automatically cross-references SMB shares and NFS exports to tag quotas).
 
-Streamlit settings are in `.streamlit/config.toml`:
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `server.address` | `127.0.0.1` | Bind address for the app |
-| `server.headless` | `true` | Run without browser auto-open |
-| `server.enableCORS` | `false` | Disable CORS for local use |
-| `browser.gatherUsageStats` | `false` | Opt out of analytics |
-
----
-
-## Workflow
-
-1. **Connect**: Select cluster from dropdown, enter credentials
-2. **Monitor**: View top offenders list on first load
-3. **Search**: Filter by share name (partial match) or access zone
-4. **Modify**: Select quota, enter new limits, confirm
-5. **Verify**: Check audit log for recorded changes
-
-###典型使用场景
-
-#### scenario: Responsive Quota Adjustment
-
-**Alert**: "Share `data_backup` at 96% usage"
-
-1. Login to `cluster_prod`
-2. Search for `data_backup`
-3. Click quota in table
-4. Modify from 500 GB → 750 GB
-5. Confirm
-6. Check audit log for verification
+### 5. 📜 Audit Log
+- Review the recent history of all changes made via the tool on the current machine.
 
 ---
 
-## Color Palette
-
-- **Primary Orange**: Pantone 158 (#F58513)
-- **Primary Green**: Pantone 3435 (#006837)
-- **Background**: White
-
-### Status Indicators
-
-| Status | Color | Usage Threshold |
-|--------|-------|-----------------|
-| Critical | 🔴 Red (#D72638) | >90% |
-| Warning | 🟡 Orange (#F58513) | 80-90% |
-| Healthy | 🟢 Green (#006837) | <80% |
-
----
-
-## Requirements
-
-- Python 3.8+
-- OneFS SDK 0.7.0
-- Streamlit 1.32+
-- Access to Dell PowerScale cluster(s)
-
----
-
-## Development
+## 🛠️ Development
 
 ### Project Structure
-
 ```
 papi-q/
-├── src/
-│   ├── __init__.py
-│   ├── api.py          # OneFS PAPI client wrapper
-│   ├── audit.py        # Audit logging functionality
-│   ├── config.py       # Configuration management
-│   ├── main.py         # Streamlit entry point
-│   ├── ui/             # UI components
-│   │   ├── components.py
-│   │   └── session.py
-│   └── utils.py        # Utility functions
-├── tests/              # Unit tests
-├── docs/               # Documentation
-│   ├── API.md
-│   ├── QUICKSTART.md
-│   └── REVIEW.md
-├── assets/             # Images and resources
-├── setup.sh            # Automated setup script
-├── requirements.txt    # Python dependencies
-└── README.md
+├── papi-q.py           # Universal Single-File Distribution (Run this!)
+├── bundle.py           # Build script to generate papi-q.py from src/
+├── clusters.json       # Cluster inventory configuration
+├── DOCS.md             # Detailed technical documentation
+├── src/                # Modular source code
+│   ├── api.py          # Refined OneFS API Bridge (v9.12.0.1)
+│   ├── main.py         # Primary Streamlit UI Logic
+│   ├── ui/             # Reusable UI Components & Session Management
+│   └── utils.py        # Formatting and pagination utilities
+└── README.md           # This file
 ```
 
-### Running Tests
-
+### Building the Bundle
+If you modify any file in the `src/` directory, update the single-file distribution by running:
 ```bash
-source venv/bin/activate
-pytest tests/ -v
-```
-
-### Building Documentation
-
-```bash
-pip install mkdocs
-mkdocs serve
+python3 bundle.py
 ```
 
 ---
 
-## Contributing
+## 📚 Technical Background
 
-Contributions are welcome! Please read our contributing guidelines before submitting pull requests.
-
----
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+- **Backend**: Uses the Dell PowerScale Platform API (PAPI) via the official `isilon-sdk`.
+- **Target Version**: Optimized for **OneFS 9.12.0.1**.
+- **Audit Trail**: Local `audit.csv` maintains an append-only record of changes.
 
 ---
 
-## Acknowledgments
+## ⚖️ License & Support
 
-- [Dell PowerScale OneFS SDK](https://github.com/dell/isilon-sdk-python)
-- [Streamlit](https://streamlit.io/)
+Licensed under the MIT License. For feature requests or issues, please contact the storage administration team or file an issue in the repository.
 
----
-
-## Support
-
-For issues and feature requests, please file an issue on GitHub.
+*Maintained by [FranksOps](https://github.com/franksops)*
