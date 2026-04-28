@@ -2,10 +2,15 @@
 
 import streamlit as st
 from typing import Any
+from src.logger import log_info, log_error
 
 
 def init_session() -> None:
     """Initialize essential session state variables."""
+    if "session_initialized" not in st.session_state:
+        log_info("Initializing new user session state")
+        st.session_state.session_initialized = True
+
     defaults = {
         "api_client": None,
         "selected_cluster": None,

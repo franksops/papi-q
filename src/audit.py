@@ -5,7 +5,7 @@ import glob
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-from src.config import DEFAULT_AUDIT_LOG, DEFAULT_CONFIG_DIR, load_config
+from src.constants import DEFAULT_CONFIG_DIR
 
 
 AUDIT_FIELDS = [

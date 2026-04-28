@@ -6,6 +6,8 @@ def bundle():
     """Consolidate src/ modules into a single papi-q.py file with a universal bootstrapper."""
     
     files = [
+        "src/constants.py",
+        "src/logger.py",
         "src/config.py",
         "src/api.py",
         "src/audit.py",
@@ -33,6 +35,7 @@ import glob
 import json
 import csv
 import time
+import logging
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum

@@ -4,28 +4,23 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional
+from src.logger import log_info, log_error, log_warning
 
 
-# Default paths
-DEFAULT_CONFIG_DIR = Path.home() / ".papi-q"
-DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
-DEFAULT_CLUSTERS_FILE = DEFAULT_CONFIG_DIR / "clusters.json"
-DEFAULT_AUDIT_LOG = Path.home() / "isilon_admin_audit.csv"
-
-
-def ensure_config_dir() -> Path:
-    """Create the config directory if it doesn't exist."""
-    DEFAULT_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return DEFAULT_CONFIG_DIR
+from src.constants import (
+    DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, 
+    DEFAULT_CLUSTERS_FILE, ensure_config_dir
+)
 
 
 def load_config() -> Dict[str, Any]:
     """Load configuration from config.json, creating defaults if missing."""
     ensure_config_dir()
+    log_info(f"Loading configuration from {DEFAULT_CONFIG_FILE}")
     
     config = {
         "verify_ssl": False,
-        "log_file": str(DEFAULT_AUDIT_LOG),
+        "log_file": str(DEFAULT_CONFIG_DIR / "isilon_admin_audit.csv"),
         "max_retries": 3,
         "cache_ttl_seconds": 60,
     }
@@ -35,9 +30,12 @@ def load_config() -> Dict[str, Any]:
             with open(DEFAULT_CONFIG_FILE, "r") as f:
                 loaded = json.load(f)
                 config.update(loaded)
-        except json.JSONDecodeError:
-            # Corrupt config, use defaults
+                log_info("Configuration loaded successfully")
+        except json.JSONDecodeError as e:
+            log_error("Corrupt config.json found, using defaults", e)
             pass
+    else:
+        log_warning("config.json not found, using defaults")
     
     return config
 
@@ -52,12 +50,16 @@ def save_config(config: Dict[str, Any]) -> None:
 def load_clusters() -> Dict[str, str]:
     """Load cluster definitions from clusters.json."""
     if not DEFAULT_CLUSTERS_FILE.exists():
+        log_warning(f"Clusters file not found at {DEFAULT_CLUSTERS_FILE}")
         return {}
     
     try:
         with open(DEFAULT_CLUSTERS_FILE, "r") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
+            clusters = json.load(f)
+            log_info(f"Loaded {len(clusters)} clusters from inventory")
+            return clusters
+    except json.JSONDecodeError as e:
+        log_error("Corrupt clusters.json found", e)
         return {}
 
 

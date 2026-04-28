@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 from src.config import load_clusters, add_cluster, remove_cluster
 from src.api import IsilonAPI
 from src.audit import write_audit_entry, read_audit_log
+from src.logger import log_info, log_error, log_warning
 from src.utils import (
     filter_quotas, get_top_offenders, paginate_list, 
     status_badge, color_for_status, bytes_to_gb
@@ -81,6 +82,10 @@ def sidebar_tools():
 
 
 def main():
+    if not st.session_state.get("startup_logged"):
+        log_info("🚀 SmartQuota Manager starting...")
+        st.session_state.startup_logged = True
+
     if not state.api_client:
         login_section()
     else:

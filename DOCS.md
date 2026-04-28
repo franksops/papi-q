@@ -59,6 +59,12 @@ When you select a quota, the manager provides a 360-degree view of the filesyste
 *   **Cluster Isolation**: Each Isilon cluster maintains its own independent, daily audit log.
 *   **Persistent**: New logs are only created on a new day; otherwise, entries are appended.
 
+### 5. System Logging (Troubleshooting)
+*   **Startup Trace**: Logs application launch, session initialization, and environment checks.
+*   **Config Validation**: Captures errors during `config.json` or `clusters.json` loading.
+*   **Location**: Always written to `~/.papi-q/system.log`.
+*   **Console Output**: Logs are also mirrored to standard output for real-time monitoring.
+
 ---
 
 ## 📚 Technical Reference & Official Resources
@@ -80,5 +86,6 @@ Every tab in the application includes direct links to the **Official Dell PowerS
 *   `papi-q.py`: The universal single-file distribution.
 *   `bundle.py`: The build script used to regenerate `papi-q.py` from the `src/` modules.
 *   `clusters.json`: Your dynamic inventory of Isilon clusters (located in `~/.papi-q/`).
+*   `system.log`: System-level troubleshooting log (located in `~/.papi-q/`).
 *   `audit_*.csv`: Daily cluster-specific audit logs (located in `~/.papi-q/`).
 *   `src/`: Modular source code for development.

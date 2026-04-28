@@ -19,6 +19,7 @@
 - **Auto-Saving Clusters**: Successful logins via custom URLs are automatically saved to your inventory.
 - **Bulk Export**: Generate human-readable CSV reports for all quotas, filtered by Access Zone or Protocol (SMB/NFS).
 - **Daily Audit Logging**: Automatic rotation of cluster-specific audit logs named `hostname_MMDDYEAR.csv`.
+- **System-Level Logging**: Comprehensive startup and error logging to `system.log` for easier troubleshooting.
 - **Integrated Docs**: Direct links to **Official Dell Documentation** for every management task.
 - **Universal Bootstrapper**: Automated environment setup for macOS (Homebrew) and Linux (apt/dnf).
 
@@ -92,7 +93,9 @@ python3 bundle.py
 
 - **Backend**: Uses the Dell PowerScale Platform API (PAPI) via the official `isilon-sdk`.
 - **Target Version**: Optimized for **OneFS 9.12.0.1**.
-- **Audit Trail**: Stored in `~/.papi-q/` with daily rotation.
+- **Logs & Audit**: All logs are stored in `~/.papi-q/`.
+    - `system.log`: Startup events, configuration errors, and API failures.
+    - `[cluster]_[date].csv`: Compliance-ready audit trails for all quota changes.
 
 ---
 
