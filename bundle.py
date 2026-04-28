@@ -67,59 +67,60 @@ def bootstrap():
     # If we aren't in a venv yet, let's find the best Python to use
     if not in_venv:
         best_python = sys.executable
-        # If current is 3.14+, search for stable fallbacks
         if sys.version_info >= (3, 14):
             for version in ["3.13", "3.12", "3.11"]:
                 path = shutil.which(f"python{version}")
                 if path:
-                    print(f"[*] Experimental Python detected. Switching to stable: {path}")
+                    print(f"[*] Switching to stable Python: {path}")
                     best_python = path
                     break
         
         if not venv_dir.exists():
-            print(f"[*] Creating stable virtual environment in {venv_dir}...")
-            if not run_command([best_python, "-m", "venv", str(venv_dir)]):
-                print(f"Error: Failed to create venv with {best_python}")
-                sys.exit(1)
+            print(f"[*] Creating virtual environment in {venv_dir}...")
+            run_command([best_python, "-m", "venv", str(venv_dir)])
         
         venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
         
-        # Verify if the venv is actually using a stable version
-        # If the venv exists but was built with 3.14, we should recreate it
+        # If the venv exists but is 3.14, wipe it
         res = subprocess.run([venv_python, "--version"], capture_output=True, text=True)
         if "3.14" in res.stdout and sys.version_info < (3, 14):
-            print("[!] Existing venv is 3.14. Recreating with stable Python...")
+            print("[!] Wiping incompatible 3.14 venv...")
             shutil.rmtree(venv_dir)
-            return bootstrap() # Recurse once to recreate
+            return bootstrap()
 
-        print("[*] Syncing dependencies in virtual environment...")
+        print("[*] Syncing dependencies (fresh install)...")
         run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
         deps = ["isilon-sdk", "streamlit", "pandas", "urllib3", "python-dotenv"]
-        if not run_command([venv_python, "-m", "pip", "install"] + deps):
-            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + deps)
+        # Use --no-cache-dir to ensure we aren't pulling a corrupt build
+        run_command([venv_python, "-m", "pip", "install", "--no-cache-dir"] + deps)
 
         print("\\n[+] Environment ready. Re-launching...\\n")
         os.execv(venv_python, [venv_python] + sys.argv)
 
-    # If we are in the venv, verify imports
+    # --- VERIFICATION PHASE (Inside Venv) ---
     deps_map = {"streamlit": "streamlit", "isi_sdk": "isilon-sdk", "pandas": "pandas", "urllib3": "urllib3", "dotenv": "python-dotenv"}
     missing = []
     for mod, pkg in deps_map.items():
         try:
             __import__(mod)
-        except ImportError as e:
+        except ImportError:
             missing.append(pkg)
-            print(f"[*] Import Failure: {mod} ({pkg}) -> {e}")
     
     if missing:
-        print(f"\\n[!] Critical: Dependencies missing inside venv ({sys.version.split()[0]})")
-        site_pkg = list(Path(sys.prefix).glob("lib/python*/site-packages"))
-        if site_pkg:
-            print(f"[*] Contents of {site_pkg[0]}:")
-            run_command(["ls", "-F", str(site_pkg[0])])
+        # Check if we are in a 'Zombie' state (pip thinks they exist, but python can't find them)
+        print(f"\\n[!] Detected inconsistent environment ({sys.version.split()[0]})")
+        print(f"[*] Missing modules: {', '.join(missing)}")
         
-        print(f"\\n[*] Try: {sys.executable} -m pip install " + " ".join(missing))
-        sys.exit(1)
+        if not os.environ.get("PAPI_RETRY"):
+            print("[*] Attempting Nuclear Recovery (wiping venv)...")
+            shutil.rmtree(venv_dir)
+            os.environ["PAPI_RETRY"] = "1"
+            # Launch original python to recreate everything
+            orig_python = shutil.which("python3") or sys.executable
+            os.execv(orig_python, [orig_python] + sys.argv)
+        else:
+            print("\\n[!] Recovery failed. Please try: rm -rf ~/.papi-q/venv")
+            sys.exit(1)
 
     return True
 
