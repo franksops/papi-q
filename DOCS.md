@@ -24,7 +24,7 @@ The script includes an intelligent bootstrapper that detects your OS (**macOS or
 
 ### Login Format
 *   **Active Directory Support**: Supports the `domain\user` format (use a single backslash in the UI).
-*   **Saved Clusters**: Select from the 6 clusters pre-defined in `clusters.json`.
+*   **Auto-Saving Clusters**: Select from the saved clusters or enter a **Custom URL**. Successful custom logins are automatically added to your inventory for future use.
 *   **Custom URL**: Select "Custom URL..." from the dropdown to manually enter a management IP or FQDN (e.g., `https://10.1.1.50:8080`).
 
 ### Security
@@ -52,31 +52,32 @@ When you select a quota, the manager provides a 360-degree view of the filesyste
 *   **Protocol Mapping**: Automatically tags quotas with "SMB" or "NFS" by cross-referencing share/export configurations.
 *   **Excel Ready**: Generates a human-readable CSV file for reporting or offline analysis.
 
-### 4. Audit Logging
-*   Every modification, creation, or deletion is logged to a local `audit.csv`.
-*   **Fields**: Timestamp, Admin User, Cluster, Action, Path, Old Limit, New Limit.
+### 4. Audit Logging (Compliance Ready)
+*   **Daily Rotation**: Logs are named `hostname_MMDDYEAR.csv` (e.g., `cluster01_04272026.csv`).
+*   **Timestamped**: All entries use a human-readable `YYYY-MM-DD HH:MM:SS` format.
+*   **Cluster Isolation**: Each Isilon cluster maintains its own independent, daily audit log.
+*   **Persistent**: New logs are only created on a new day; otherwise, entries are appended.
 
 ---
 
-## 📚 Technical Reference & Source Links
+## 📚 Technical Reference & Official Resources
 
-### Backend: OneFS Platform API (PAPI)
-The tool interacts with the OneFS PAPI on port 8080.
-*   **API Docs**: [OneFS 9.12.0.1 PAPI Reference](https://www.dell.com/support/manuals/en-us/isilon-onefs/onefs-papi-9.12.0.1-ref/introduction)
+### In-App Documentation
+Every tab in the application includes direct links to the **Official Dell PowerScale OneFS 9.12.0.x Documentation**:
+*   **Platform API Reference**: Direct links to Quota, Snapshot, and Namespace API documentation.
+*   **CLI Reference**: Access to the full OneFS 9.12 CLI Command Reference (PDF).
+*   **Info Hub**: Central landing page for all OneFS 9.12 manuals.
 
 ### Libraries & SDKs
-*   **Isilon SDK**: Official Dell Python client for OneFS.
-    *   [Source (GitHub)](https://github.com/isilon/isilon_sdk) | [PyPI](https://pypi.org/project/isilon-sdk/)
-*   **Streamlit**: The UI framework providing the web interface.
-    *   [Documentation](https://docs.streamlit.io/)
-*   **Pandas**: Used for high-speed quota filtering and CSV generation.
-    *   [Documentation](https://pandas.pydata.org/docs/)
+*   **Isilon SDK**: Official Dell Python client for OneFS (`isilon_sdk.v9_12_0`).
+*   **Streamlit**: High-performance UI framework.
+*   **Pandas**: Data processing engine for reporting and analytics.
 
 ---
 
 ## 📁 File Structure
 *   `papi-q.py`: The universal single-file distribution.
-*   `clusters.json`: Your inventory of Isilon clusters.
-*   `audit.csv`: Automatically generated log of administrator actions.
-*   `src/`: Modular source code for development (contains `api.py`, `main.py`, etc.).
-*   `bundle.py`: The build script used to regenerate `papi-q.py` after code changes.
+*   `bundle.py`: The build script used to regenerate `papi-q.py` from the `src/` modules.
+*   `clusters.json`: Your dynamic inventory of Isilon clusters (located in `~/.papi-q/`).
+*   `audit_*.csv`: Daily cluster-specific audit logs (located in `~/.papi-q/`).
+*   `src/`: Modular source code for development.

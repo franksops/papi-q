@@ -136,7 +136,8 @@ def login_section():
                 st.sidebar.error("Please enter a custom URL")
                 return
             cluster_url = custom_url
-            cluster_display_name = custom_url.split("//")[-1].split(":")[0]
+            # Derive a clean name from the URL
+            cluster_display_name = custom_url.split("//")[-1].split(":")[0].replace(".", "_")
         else:
             cluster_url = clusters[selected_cluster]
             cluster_display_name = selected_cluster
@@ -151,11 +152,15 @@ def login_section():
             )
             set_api_client(api)
             
+            # If it was a custom URL, save it to clusters.json for next time
+            if selected_cluster == "Custom URL...":
+                add_cluster(cluster_display_name, cluster_url)
+            
             # Store additional session state
             state.selected_cluster = cluster_display_name
             state.admin_user = username
             
-            st.success(f"✅ Connected to {selected_cluster}")
+            st.success(f"✅ Connected to {cluster_display_name}")
             st.rerun()
         except Exception as e:
             st.sidebar.error(f"Connection failed: {e}")
@@ -240,6 +245,9 @@ def create_tab():
     """Tab for creating new quotas."""
     st.header("Provision New Quota ➕")
     
+    # Official Documentation Link
+    st.info("📖 [Official Dell Documentation: Creating Quotas](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)")
+    
     if not state.api_client:
         st.warning("Login required")
         return
@@ -303,6 +311,9 @@ def create_tab():
 def export_tab():
     """Tab for bulk exporting quotas."""
     st.header("Bulk Export 📥")
+    
+    # Official Documentation Link
+    st.info("📖 [OneFS 9.12.0.0 Documentation Info Hub](https://www.dell.com/support/kbdoc/en-us/000355502/powerscale-onefs-9-12-0-0-documentation-info-hub)")
     
     if not state.api_client:
         st.warning("Login required")
@@ -374,6 +385,9 @@ def export_tab():
 def monitoring_tab():
     """Tab for quota monitoring and viewing."""
     st.header("Quota Monitoring")
+    
+    # Official Documentation Link
+    st.info("📖 [Official Dell Documentation: Quota Monitoring](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)")
     
     api = state.api_client
     
@@ -487,6 +501,15 @@ def monitoring_tab():
 def modify_tab():
     """Tab for universal quota and path modification."""
     st.header("Universal Object Manager 🛠️")
+    
+    # Official Documentation Link
+    with st.expander("📖 Official Dell Documentation Resources", expanded=False):
+        st.markdown("""
+        - [Quota Management API](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)
+        - [SnapshotIQ Management API](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)
+        - [Namespace (ACL) API Reference](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)
+        - [OneFS 9.12 CLI Command Reference (PDF)](https://dl.dell.com/content/manual24245533-powerscale-onefs-9-12-0-0-cli-command-reference.pdf)
+        """)
     
     if not state.api_client:
         st.warning("Login required")
@@ -608,7 +631,10 @@ def modify_tab():
 
 def audit_tab():
     """Tab for viewing audit log."""
-    st.header("Audit Log 📜")
+    st.header(f"Audit Log: {state.selected_cluster} 📜")
+    
+    # Official Documentation Link
+    st.info("📖 [OneFS 9.12.0.0 Documentation Info Hub](https://www.dell.com/support/kbdoc/en-us/000355502/powerscale-onefs-9-12-0-0-documentation-info-hub)")
     
     if not state.api_client:
         st.warning("Login required")
@@ -616,17 +642,18 @@ def audit_tab():
     
     # Display recent audit entries
     try:
-        from audit import read_audit_log
-        log_file = load_config().get("log_file", "~/.papi-q/audit.csv")
+        from src.audit import read_audit_log
         
-        entries = read_audit_log()
+        # This will automatically use the cluster-specific log file
+        entries = read_audit_log(cluster=state.selected_cluster)
         
         if not entries:
-            st.info("No audit entries found.")
+            st.info(f"No audit entries found for {state.selected_cluster}.")
             return
         
         # Show most recent 50
         recent = entries[-50:]
+        recent.reverse() # Show newest at top
         
         df = pd.DataFrame(recent)
         st.dataframe(df, hide_index=True, use_container_width=True)

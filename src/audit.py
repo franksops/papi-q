@@ -32,22 +32,13 @@ def write_audit_entry(
 ) -> bool:
     """
     Write an audit log entry for a quota modification.
-    
-    Args:
-        admin: Username who performed the action
-        cluster: Cluster name where action occurred
-        action: Type of action (e.g., "QUOTA_MODIFY")
-        share_name: Name of the share
-        path: Quota path
-        old_limit_gb: Previous hard limit in GB
-        new_limit_gb: New hard limit in GB
-        log_file: Path to audit log file (defaults to config value)
-    
-    Returns:
-        True if successful, False otherwise
     """
     if log_file is None:
-        log_file = load_config().get("log_file", str(DEFAULT_AUDIT_LOG))
+        # Create cluster-specific audit log file in the config directory
+        from src.config import DEFAULT_CONFIG_DIR
+        safe_cluster_name = "".join([c if c.isalnum() else "_" for c in cluster])
+        datestamp = datetime.now().strftime("%m%d%Y")
+        log_file = str(DEFAULT_CONFIG_DIR / f"{safe_cluster_name}_{datestamp}.csv")
     
     log_path = Path(log_file)
     
@@ -56,7 +47,7 @@ def write_audit_entry(
     
     # Build entry
     entry = {
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "admin": admin,
         "cluster": cluster,
         "action": action,
@@ -88,20 +79,16 @@ def read_audit_log(
     log_file: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Read audit log entries with optional filtering.
-    
-    Args:
-        cluster: Filter by cluster name
-        share_name: Filter by share name (partial match)
-        start_date: Filter entries from this date (ISO format)
-        end_date: Filter entries until this date (ISO format)
-        log_file: Path to audit log file
-    
-    Returns:
-        List of audit log entries (oldest first)
+    Read audit log entries. Since logs are now daily, this reads the current day's log by default.
     """
     if log_file is None:
-        log_file = load_config().get("log_file", str(DEFAULT_AUDIT_LOG))
+        if cluster:
+            from src.config import DEFAULT_CONFIG_DIR
+            safe_cluster_name = "".join([c if c.isalnum() else "_" for c in cluster])
+            datestamp = datetime.now().strftime("%m%d%Y")
+            log_file = str(DEFAULT_CONFIG_DIR / f"{safe_cluster_name}_{datestamp}.csv")
+        else:
+            log_file = load_config().get("log_file", str(DEFAULT_AUDIT_LOG))
     
     log_path = Path(log_file)
     if not log_path.exists():
@@ -113,23 +100,19 @@ def read_audit_log(
             reader = csv.DictReader(f)
             for row in reader:
                 # Apply filters
-                if cluster and row["cluster"] != cluster:
+                if cluster and row.get("cluster") and row["cluster"] != cluster:
                     continue
-                if share_name and share_name.lower() not in row["share_name"].lower():
-                    continue
-                if start_date and row["timestamp"] < start_date:
-                    continue
-                if end_date and row["timestamp"] > end_date:
+                if share_name and row.get("share_name") and share_name.lower() not in row["share_name"].lower():
                     continue
                 
                 # Convert numeric fields
-                row["old_limit_gb"] = float(row["old_limit_gb"]) if row["old_limit_gb"] else 0.0
-                row["new_limit_gb"] = float(row["new_limit_gb"]) if row["new_limit_gb"] else 0.0
+                row["old_limit_gb"] = float(row["old_limit_gb"]) if row.get("old_limit_gb") else 0.0
+                row["new_limit_gb"] = float(row["new_limit_gb"]) if row.get("new_limit_gb") else 0.0
                 
                 results.append(row)
         
-        # Sort by timestamp (oldest first)
-        results.sort(key=lambda x: x["timestamp"])
+        # Sort by timestamp (newest first for reading)
+        results.sort(key=lambda x: x["timestamp"], reverse=True)
         return results
     except Exception as e:
         print(f"READ AUDIT ERROR: {e}", flush=True)
