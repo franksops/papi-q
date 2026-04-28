@@ -7,13 +7,14 @@
 ### The Single-File Experience
 The entire application is bundled into a single file: `papi-q.py`. 
 
-### Running the App
+### Recommended "One-Liner" Deployment
+Run this on any macOS or Linux jump box to download and launch the manager instantly:
 ```bash
-python3 papi-q.py
+curl -L -o papi-q.py https://raw.githubusercontent.com/franksops/papi-q/gemini/papi-q.py && python3 papi-q.py
 ```
 
 ### Universal Bootstrapper
-The script includes an intelligent bootstrapper that detects your OS (**macOS or Linux**) and automatically handles environment setup:
+The script includes an intelligent bootstrapper that handles environment setup:
 *   **System Deps**: Detects and offers to install `brew` (macOS), `apt` (Debian/Ubuntu), or `dnf` (RHEL/CentOS) requirements.
 *   **Python Deps**: Automatically installs `isilon-sdk`, `streamlit`, `pandas`, and `urllib3` via `pip`.
 *   **Self-Launch**: Automatically invokes the Streamlit server after dependencies are met.

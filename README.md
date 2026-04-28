@@ -27,16 +27,16 @@
 ## 📦 Installation & Setup
 
 ### The Universal Way (Recommended)
-You don't need to manually install dependencies or set up virtual environments. Simply download `papi-q.py` and run it:
+The fastest way to deploy this to a new jump box is via `curl`. This command downloads the self-bootstrapping script and launches it immediately:
 
 ```bash
-python3 papi-q.py
+curl -L -o papi-q.py https://raw.githubusercontent.com/franksops/papi-q/gemini/papi-q.py && python3 papi-q.py
 ```
 
 **What happens next?**
 1. **OS Detection**: The script identifies if you are on macOS or Linux.
 2. **System Bootstrap**: It checks for system-level requirements and offers to install them (e.g., `brew install python` or `apt install python3-pip`).
-3. **Python Bootstrap**: It automatically installs `isilon-sdk`, `streamlit`, `pandas`, and other requirements.
+3. **Python Bootstrap**: It automatically installs `isilon-sdk`, `streamlit`, `pandas`, and other requirements in the background.
 4. **Auto-Launch**: The Streamlit web interface launches automatically.
 
 ---
