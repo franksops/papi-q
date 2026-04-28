@@ -169,6 +169,7 @@ class IsilonAPI:
             NamespaceApiClass = find_component(["NamespaceApi"])
             ProtocolsApiClass = find_component(["ProtocolsApi"])
             SnapshotApiClass = find_component(["SnapshotApi"])
+            ZonesApiClass = find_component(["ZonesApi"])
 
             if not all([ConfigClass, ApiClientClass, QuotaApiClass]):
                 raise ImportError(f"Could not locate core SDK API classes in {sdk.__name__}")
@@ -186,12 +187,23 @@ class IsilonAPI:
             self.namespaces_api = NamespaceApiClass(api_client) if NamespaceApiClass else None
             self.protocols_api = ProtocolsApiClass(api_client) if ProtocolsApiClass else None
             self.snapshot_api = SnapshotApiClass(api_client) if SnapshotApiClass else None
+            self.zones_api = ZonesApiClass(api_client) if ZonesApiClass else None
 
-            log_info(f"SDK connected to {self.cluster_url} for user {username}")
+            # --- AUTH VERIFICATION ---
+            # Perform a lightweight call to verify credentials immediately
+            try:
+                # Try getting cluster identity or a simple quota list limit 1
+                method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
+                method(limit=1)
+                log_info(f"SDK connected and verified for user {username}")
+            except Exception as e:
+                if "401" in str(e) or "Unauthorized" in str(e):
+                    raise ValueError("Authentication Failed: Username or password incorrect.")
+                raise RuntimeError(f"Connection verification failed: {e}")
 
         except Exception as e:
             log_error("SDK Initialization Failed", e)
-            raise ImportError(f"SDK Error: {e}")
+            raise
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
@@ -339,26 +351,47 @@ class IsilonAPI:
         """Returns a mapping of Zone Name -> Base Path. Tries multiple API paths for discovery."""
         data = {"System": "/ifs"}
         
-        # 1. Try Namespaces API
-        if self.namespaces_api:
+        # 1. Try Zones API (Modern OneFS 8.x/9.x)
+        if self.zones_api:
             try:
-                resp = self.namespaces_api.get_access_zones()
-                if hasattr(resp, "access_zones"):
-                    for z in resp.access_zones:
-                        path = getattr(z, "path", "")
-                        if z.name == "System" and (not path or path == "/"): path = "/ifs"
-                        if z.name and path: data[z.name] = path
+                # v9.x uses list_zones or get_zones
+                method = getattr(self.zones_api, "list_zones", None) or getattr(self.zones_api, "get_zones", None)
+                if method:
+                    resp = method()
+                    # Response can be { "zones": [...] } or { "access_zones": [...] }
+                    zones = getattr(resp, "zones", None) or getattr(resp, "access_zones", None)
+                    if zones:
+                        for z in zones:
+                            path = getattr(z, "path", "")
+                            if z.name == "System" and (not path or path == "/"): path = "/ifs"
+                            if z.name and path: data[z.name] = path
+            except Exception as e:
+                log_warning(f"Zones discovery failed: {e}")
+
+        # 2. Try Namespaces API (Legacy/Specific Versions)
+        if len(data) <= 1 and self.namespaces_api:
+            try:
+                method = getattr(self.namespaces_api, "get_access_zones", None) or getattr(self.namespaces_api, "list_access_zones", None)
+                if method:
+                    resp = method()
+                    zones = getattr(resp, "access_zones", None) or getattr(resp, "zones", None)
+                    if zones:
+                        for z in zones:
+                            path = getattr(z, "path", "")
+                            if z.name == "System" and (not path or path == "/"): path = "/ifs"
+                            if z.name and path: data[z.name] = path
             except Exception as e:
                 log_warning(f"Namespaces zone discovery failed: {e}")
 
-        # 2. Try Protocols API (often has access to zone list via a different path)
+        # 3. Try Protocols API (often has access to zone list via a different path)
         if len(data) <= 1 and self.protocols_api:
             try:
                 # Some SDK versions have list_access_zones here
-                method = getattr(self.protocols_api, "list_access_zones", None)
+                method = getattr(self.protocols_api, "list_access_zones", None) or getattr(self.protocols_api, "get_access_zones", None)
                 if method:
                     resp = method()
-                    for z in getattr(resp, "zones", []):
+                    zones = getattr(resp, "zones", []) or getattr(resp, "access_zones", [])
+                    for z in zones:
                         path = getattr(z, "path", "")
                         if z.name == "System" and (not path or path == "/"): path = "/ifs"
                         if z.name and path: data[z.name] = path
