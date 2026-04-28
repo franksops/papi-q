@@ -75,7 +75,7 @@ def render_snapshot_viewer(snapshots: List[Dict[str, Any]]):
 
 def render_acl_viewer(acl: Dict[str, Any]):
     """Render the ACL/Permissions view."""
-    st.markdown("### 🔒 Filesystem Permissions (ACL)")
+    st.markdown("### 🔒 Filesystem Permissions (ACL) `READ-ONLY` ")
     
     if "error" in acl:
         st.error(f"Could not retrieve ACL: {acl['error']}")

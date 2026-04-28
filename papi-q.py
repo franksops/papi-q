@@ -609,6 +609,95 @@ class IsilonAPI:
     def list_access_zones(self) -> List[str]:
         return list(self.get_access_zones_info().keys())
 
+    def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
+        """Fetch raw quota dictionary for the Dynamic Grid."""
+        try:
+            # 0.7.0 uses get_quota_quota, older uses get_quota_entry
+            method = getattr(self.quota_api, "get_quota_quota", None) or getattr(self.quota_api, "get_quota_entry")
+            resp = method(quota_id)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e:
+            raise RuntimeError(f"Fetch failed: {e}")
+
+    def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            update_obj = self._models["entry"]()
+            for k, v in payload.items():
+                # Handle thresholds vs limits
+                if (k == "limits" or k == "thresholds") and isinstance(v, dict):
+                    lims = self._models["limits"]()
+                    for lk, lv in v.items():
+                        if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
+                    setattr(update_obj, k, lims)
+                elif hasattr(update_obj, k):
+                    setattr(update_obj, k, v)
+            
+            # 0.7.0 uses update_quota_quota, older uses update_quota_entry
+            method = getattr(self.quota_api, "update_quota_quota", None) or getattr(self.quota_api, "update_quota_entry")
+            resp = method(quota_id, update_obj)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e:
+            raise RuntimeError(f"Update Failed: {e}")
+
+    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, snapshots: bool = False) -> str:
+        """Create new quota. Only sets non-zero limits to avoid unintended overwrites."""
+        try:
+            q_limits = self._models["limits"]()
+            if limits.get("hard"): q_limits.hard = int(round(limits["hard"] * (1024**3)))
+            if limits.get("soft"): q_limits.soft = int(round(limits["soft"] * (1024**3)))
+            if limits.get("advisory"): q_limits.advisory = int(round(limits["advisory"] * (1024**3)))
+            
+            # 0.7.0 uses 'thresholds', older uses 'limits'
+            params = {
+                "path": path, "type": q_type, 
+                "enforced": enforced, "include_snapshots": snapshots, "zone": access_zone
+            }
+            if hasattr(self._models["quota"](), "thresholds"):
+                params["thresholds"] = q_limits
+            else:
+                params["limits"] = q_limits
+                
+            q_body = self._models["quota"](**params)
+            
+            # 0.7.0 uses create_quota_quota, older uses create_quota
+            method = getattr(self.quota_api, "create_quota_quota", None) or getattr(self.quota_api, "create_quota")
+            resp = method(q_body)
+            return resp.id
+        except Exception as e:
+            raise RuntimeError(f"Create Failed: {e}")
+
+    def delete_quota(self, quota_id: str) -> bool:
+        try:
+            # 0.7.0 uses delete_quota_quota, older uses delete_quota_entry
+            method = getattr(self.quota_api, "delete_quota_quota", None) or getattr(self.quota_api, "delete_quota_entry")
+            method(quota_id)
+            return True
+        except Exception as e:
+            raise RuntimeError(f"Delete Failed: {e}")
+
+    def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
+        """List snapshots, sorted newest first."""
+        if not self.snapshot_api: return []
+        try:
+            resp = self.snapshot_api.list_snapshots(path=path)
+            snaps = [{
+                "id": s.id, "name": s.name, "created_epoch": s.created,
+                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
+                "size": getattr(s, "size", 0)
+            } for s in resp.snapshots]
+            snaps.sort(key=lambda x: x["created_epoch"] or 0, reverse=True)
+            return snaps
+        except Exception: return []
+
+    def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
+        """Fetch ACL from Namespace API with explicit zone support."""
+        if not self.namespaces_api: return {"error": "Namespace API not available"}
+        try:
+            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
+            resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e: return {"error": str(e)}
+
 
 # --- Source: src/audit.py ---
 
@@ -937,7 +1026,7 @@ def render_snapshot_viewer(snapshots: List[Dict[str, Any]]):
 
 def render_acl_viewer(acl: Dict[str, Any]):
     """Render the ACL/Permissions view."""
-    st.markdown("### 🔒 Filesystem Permissions (ACL)")
+    st.markdown("### 🔒 Filesystem Permissions (ACL) `READ-ONLY` ")
     
     if "error" in acl:
         st.error(f"Could not retrieve ACL: {acl['error']}")
@@ -1187,6 +1276,13 @@ def modify_tab():
 
     api = state.api_client
     st.subheader(f"📁 {quota.path}")
+    
+    # PRODUCTION SAFETY LOCK
+    st.sidebar.divider()
+    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, help="Must be checked to apply any changes or deletions.")
+    if not safety_lock:
+        st.sidebar.info("🔒 Actions are currently locked.")
+
     t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
     
     with t1:
@@ -1195,7 +1291,31 @@ def modify_tab():
             with st.form(f"u_{quota.id}"):
                 payload = render_dynamic_grid(raw, f"e_{quota.id}")
                 st.divider()
-                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary"):
+                
+                # Destructive Change Detection
+                destructive_warns = []
+                if "limits" in payload:
+                    new_lims = payload["limits"]
+                    curr_lims = raw.get("limits", {})
+                    
+                    for key in ["hard", "soft", "advisory"]:
+                        if key in new_lims:
+                            new_val = int(new_lims[key])
+                            curr_val = int(curr_lims.get(key, 0))
+                            if new_val < curr_val and new_val != 0:
+                                destructive_warns.append(f"Reducing {key} limit from {bytes_to_gb(curr_val)}GB to {bytes_to_gb(new_val)}GB.")
+                            if new_val < quota.usage_bytes and new_val != 0:
+                                destructive_warns.append(f"New {key} limit is BELOW current usage ({bytes_to_gb(quota.usage_bytes)}GB)!")
+
+                if destructive_warns:
+                    for w in destructive_warns: st.warning(f"⚠️ {w}")
+                    confirm_destructive = st.checkbox("I confirm these REDUCTIONS are intended", value=False)
+                else:
+                    confirm_destructive = True
+
+                submit_disabled = not safety_lock or (destructive_warns and not confirm_destructive)
+                
+                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary", disabled=submit_disabled):
                     if payload:
                         updated = api.update_quota_dynamic(quota.id, payload)
                         keys = ", ".join(payload.keys())
@@ -1206,12 +1326,15 @@ def modify_tab():
                         st.rerun()
             
             with st.expander("🗑️ Danger Zone"):
-                if st.text_input("Type 'DELETE' to confirm decommissioning", key=f"d_tx_{quota.id}") == "DELETE":
-                    if st.button("CONFIRM PERMANENT DELETE", key=f"d_bt_{quota.id}", type="primary"):
-                        api.delete_quota(quota.id)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
-                        state.quotas_loaded = False
-                        st.rerun()
+                if not safety_lock:
+                    st.error("🔒 Production actions are locked in the sidebar.")
+                else:
+                    if st.text_input("Type 'DELETE' to confirm decommissioning", key=f"d_tx_{quota.id}") == "DELETE":
+                        if st.button("CONFIRM PERMANENT DELETE", key=f"d_bt_{quota.id}", type="primary"):
+                            api.delete_quota(quota.id)
+                            write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
+                            state.quotas_loaded = False
+                            st.rerun()
         except Exception as e:
             if not handle_api_error(e): st.error(f"Error: {e}")
 
@@ -1222,6 +1345,9 @@ def modify_tab():
 def provision_tab():
     st.header("Provision Quota ➕")
     api = state.api_client
+    
+    safety_lock = st.session_state.get("safety_lock", False) # Fallback check if sidebar not rendered yet
+    
     with st.form("p_form"):
         path = st.text_input("Path", placeholder="/ifs/data/...")
         col1, col2 = st.columns(2)
@@ -1236,7 +1362,8 @@ def provision_tab():
         enforced = st.checkbox("Enforced", value=True)
         snapshots = st.checkbox("Include Snapshots", value=False)
         
-        if st.form_submit_button("CREATE QUOTA", type="primary"):
+        btn_label = "CREATE QUOTA" if safety_lock else "CREATE QUOTA (LOCKED)"
+        if st.form_submit_button(btn_label, type="primary", disabled=not safety_lock):
             if not path.startswith("/ifs"): st.error("Invalid path"); return
             try:
                 api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)

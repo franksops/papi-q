@@ -322,3 +322,92 @@ class IsilonAPI:
 
     def list_access_zones(self) -> List[str]:
         return list(self.get_access_zones_info().keys())
+
+    def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
+        """Fetch raw quota dictionary for the Dynamic Grid."""
+        try:
+            # 0.7.0 uses get_quota_quota, older uses get_quota_entry
+            method = getattr(self.quota_api, "get_quota_quota", None) or getattr(self.quota_api, "get_quota_entry")
+            resp = method(quota_id)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e:
+            raise RuntimeError(f"Fetch failed: {e}")
+
+    def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            update_obj = self._models["entry"]()
+            for k, v in payload.items():
+                # Handle thresholds vs limits
+                if (k == "limits" or k == "thresholds") and isinstance(v, dict):
+                    lims = self._models["limits"]()
+                    for lk, lv in v.items():
+                        if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
+                    setattr(update_obj, k, lims)
+                elif hasattr(update_obj, k):
+                    setattr(update_obj, k, v)
+            
+            # 0.7.0 uses update_quota_quota, older uses update_quota_entry
+            method = getattr(self.quota_api, "update_quota_quota", None) or getattr(self.quota_api, "update_quota_entry")
+            resp = method(quota_id, update_obj)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e:
+            raise RuntimeError(f"Update Failed: {e}")
+
+    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, snapshots: bool = False) -> str:
+        """Create new quota. Only sets non-zero limits to avoid unintended overwrites."""
+        try:
+            q_limits = self._models["limits"]()
+            if limits.get("hard"): q_limits.hard = int(round(limits["hard"] * (1024**3)))
+            if limits.get("soft"): q_limits.soft = int(round(limits["soft"] * (1024**3)))
+            if limits.get("advisory"): q_limits.advisory = int(round(limits["advisory"] * (1024**3)))
+            
+            # 0.7.0 uses 'thresholds', older uses 'limits'
+            params = {
+                "path": path, "type": q_type, 
+                "enforced": enforced, "include_snapshots": snapshots, "zone": access_zone
+            }
+            if hasattr(self._models["quota"](), "thresholds"):
+                params["thresholds"] = q_limits
+            else:
+                params["limits"] = q_limits
+                
+            q_body = self._models["quota"](**params)
+            
+            # 0.7.0 uses create_quota_quota, older uses create_quota
+            method = getattr(self.quota_api, "create_quota_quota", None) or getattr(self.quota_api, "create_quota")
+            resp = method(q_body)
+            return resp.id
+        except Exception as e:
+            raise RuntimeError(f"Create Failed: {e}")
+
+    def delete_quota(self, quota_id: str) -> bool:
+        try:
+            # 0.7.0 uses delete_quota_quota, older uses delete_quota_entry
+            method = getattr(self.quota_api, "delete_quota_quota", None) or getattr(self.quota_api, "delete_quota_entry")
+            method(quota_id)
+            return True
+        except Exception as e:
+            raise RuntimeError(f"Delete Failed: {e}")
+
+    def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
+        """List snapshots, sorted newest first."""
+        if not self.snapshot_api: return []
+        try:
+            resp = self.snapshot_api.list_snapshots(path=path)
+            snaps = [{
+                "id": s.id, "name": s.name, "created_epoch": s.created,
+                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
+                "size": getattr(s, "size", 0)
+            } for s in resp.snapshots]
+            snaps.sort(key=lambda x: x["created_epoch"] or 0, reverse=True)
+            return snaps
+        except Exception: return []
+
+    def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
+        """Fetch ACL from Namespace API with explicit zone support."""
+        if not self.namespaces_api: return {"error": "Namespace API not available"}
+        try:
+            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
+            resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
+            return resp.to_dict() if hasattr(resp, "to_dict") else {}
+        except Exception as e: return {"error": str(e)}

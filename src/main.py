@@ -223,6 +223,13 @@ def modify_tab():
 
     api = state.api_client
     st.subheader(f"📁 {quota.path}")
+    
+    # PRODUCTION SAFETY LOCK
+    st.sidebar.divider()
+    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, help="Must be checked to apply any changes or deletions.")
+    if not safety_lock:
+        st.sidebar.info("🔒 Actions are currently locked.")
+
     t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
     
     with t1:
@@ -231,7 +238,31 @@ def modify_tab():
             with st.form(f"u_{quota.id}"):
                 payload = render_dynamic_grid(raw, f"e_{quota.id}")
                 st.divider()
-                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary"):
+                
+                # Destructive Change Detection
+                destructive_warns = []
+                if "limits" in payload:
+                    new_lims = payload["limits"]
+                    curr_lims = raw.get("limits", {})
+                    
+                    for key in ["hard", "soft", "advisory"]:
+                        if key in new_lims:
+                            new_val = int(new_lims[key])
+                            curr_val = int(curr_lims.get(key, 0))
+                            if new_val < curr_val and new_val != 0:
+                                destructive_warns.append(f"Reducing {key} limit from {bytes_to_gb(curr_val)}GB to {bytes_to_gb(new_val)}GB.")
+                            if new_val < quota.usage_bytes and new_val != 0:
+                                destructive_warns.append(f"New {key} limit is BELOW current usage ({bytes_to_gb(quota.usage_bytes)}GB)!")
+
+                if destructive_warns:
+                    for w in destructive_warns: st.warning(f"⚠️ {w}")
+                    confirm_destructive = st.checkbox("I confirm these REDUCTIONS are intended", value=False)
+                else:
+                    confirm_destructive = True
+
+                submit_disabled = not safety_lock or (destructive_warns and not confirm_destructive)
+                
+                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary", disabled=submit_disabled):
                     if payload:
                         updated = api.update_quota_dynamic(quota.id, payload)
                         keys = ", ".join(payload.keys())
@@ -242,12 +273,15 @@ def modify_tab():
                         st.rerun()
             
             with st.expander("🗑️ Danger Zone"):
-                if st.text_input("Type 'DELETE' to confirm decommissioning", key=f"d_tx_{quota.id}") == "DELETE":
-                    if st.button("CONFIRM PERMANENT DELETE", key=f"d_bt_{quota.id}", type="primary"):
-                        api.delete_quota(quota.id)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
-                        state.quotas_loaded = False
-                        st.rerun()
+                if not safety_lock:
+                    st.error("🔒 Production actions are locked in the sidebar.")
+                else:
+                    if st.text_input("Type 'DELETE' to confirm decommissioning", key=f"d_tx_{quota.id}") == "DELETE":
+                        if st.button("CONFIRM PERMANENT DELETE", key=f"d_bt_{quota.id}", type="primary"):
+                            api.delete_quota(quota.id)
+                            write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
+                            state.quotas_loaded = False
+                            st.rerun()
         except Exception as e:
             if not handle_api_error(e): st.error(f"Error: {e}")
 
@@ -258,6 +292,9 @@ def modify_tab():
 def provision_tab():
     st.header("Provision Quota ➕")
     api = state.api_client
+    
+    safety_lock = st.session_state.get("safety_lock", False) # Fallback check if sidebar not rendered yet
+    
     with st.form("p_form"):
         path = st.text_input("Path", placeholder="/ifs/data/...")
         col1, col2 = st.columns(2)
@@ -272,7 +309,8 @@ def provision_tab():
         enforced = st.checkbox("Enforced", value=True)
         snapshots = st.checkbox("Include Snapshots", value=False)
         
-        if st.form_submit_button("CREATE QUOTA", type="primary"):
+        btn_label = "CREATE QUOTA" if safety_lock else "CREATE QUOTA (LOCKED)"
+        if st.form_submit_button(btn_label, type="primary", disabled=not safety_lock):
             if not path.startswith("/ifs"): st.error("Invalid path"); return
             try:
                 api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
