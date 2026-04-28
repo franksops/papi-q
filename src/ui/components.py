@@ -3,9 +3,7 @@
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any
-
-from src.api import QuotaEntry, Status
-from src.utils import status_badge, format_size, bytes_to_gb
+from src.utils import format_size, bytes_to_gb
 
 
 def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dict[str, Any]:
@@ -99,33 +97,3 @@ def render_acl_viewer(acl: Dict[str, Any]):
             type_ = ace.get("type", "unknown")
             access = ace.get("accessdesc", "N/A")
             st.markdown(f"**{trustee}** ({type_}): `{access}`")
-
-
-def create_modification_form(
-    quota: QuotaEntry,
-    key_prefix: str = "modify_form",
-) -> Dict[str, Any]:
-    """Create a form for simple limit modifications."""
-    st.subheader(f"Modify Quota: {quota.path}")
-    
-    with st.form(key=f"{key_prefix}_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            new_hard = st.number_input("New Hard Limit (GB)", min_value=0.0, value=quota.hard_limit_gb, step=1.0)
-            if new_hard > 0 and new_hard < quota.usage_gb:
-                st.error(f"⚠️ Warning: Limit ({new_hard:.2f} GB) < current usage ({quota.usage_gb:.2f} GB)")
-        
-        with col2:
-            new_soft = st.number_input("New Soft Limit (GB)", min_value=0.0, value=quota.soft_limit_gb, step=1.0)
-        
-        apply_to_children = st.checkbox("Apply to child quotas", value=False)
-        confirm = st.checkbox("I confirm this production change", value=False)
-        submitted = st.form_submit_button("APPLY LIMITS", use_container_width=True)
-    
-    if submitted and confirm:
-        return {
-            "hard_limit_gb": new_hard,
-            "soft_limit_gb": new_soft,
-            "apply_to_children": apply_to_children,
-        }
-    return None

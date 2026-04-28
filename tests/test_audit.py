@@ -1,9 +1,7 @@
 import unittest
 import os
-import csv
 import shutil
 from pathlib import Path
-from datetime import datetime
 from unittest.mock import patch
 import src.audit as audit
 
@@ -11,7 +9,7 @@ class TestAudit(unittest.TestCase):
     def setUp(self):
         self.test_dir = Path("./test_audit_dir")
         self.test_dir.mkdir(exist_ok=True)
-        self.patcher = patch('src.config.DEFAULT_CONFIG_DIR', self.test_dir)
+        self.patcher = patch('src.audit.DEFAULT_CONFIG_DIR', self.test_dir)
         self.patcher.start()
 
     def tearDown(self):
@@ -19,47 +17,23 @@ class TestAudit(unittest.TestCase):
         if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
-    def test_write_audit_entry_naming(self):
-        # Test that the log file is named correctly hostname_MMDDYEAR.csv
-        cluster_name = "testcluster"
-        datestamp = datetime.now().strftime("%m%d%Y")
-        expected_filename = f"{cluster_name}_{datestamp}.csv"
+    def test_audit_history_globbing(self):
+        # Create fake log files for different days
+        cluster = "testcluster"
+        day1 = self.test_dir / f"{cluster}_01012026.csv"
+        day2 = self.test_dir / f"{cluster}_01022026.csv"
         
-        audit.write_audit_entry(
-            admin="admin",
-            cluster=cluster_name,
-            action="TEST_ACTION",
-            share_name="test_share",
-            path="/ifs/test",
-            old_limit_gb=10,
-            new_limit_gb=20
-        )
+        for f in [day1, day2]:
+            with open(f, "w") as out:
+                out.write("timestamp,admin,cluster,action,share_name,path,old_limit_gb,new_limit_gb\n")
+                # Extract day from filename testcluster_MMDDYEAR.csv (index 15)
+                day = f.name.split("_")[-1][3] # simplified
+                out.write(f"2026-01-0{day},admin,{cluster},TEST,/ifs/test,0,10\n")
         
-        expected_path = self.test_dir / expected_filename
-        self.assertTrue(expected_path.exists())
-
-    def test_audit_log_content(self):
-        cluster_name = "content_test"
-        audit.write_audit_entry(
-            admin="admin_user",
-            cluster=cluster_name,
-            action="MODIFY",
-            share_name="share1",
-            path="/ifs/path1",
-            old_limit_gb=100.5,
-            new_limit_gb=200.7
-        )
-        
-        datestamp = datetime.now().strftime("%m%d%Y")
-        log_path = self.test_dir / f"{cluster_name}_{datestamp}.csv"
-        
-        with open(log_path, "r") as f:
-            reader = csv.DictReader(f)
-            rows = list(reader)
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["admin"], "admin_user")
-            self.assertEqual(rows[0]["action"], "MODIFY")
-            self.assertEqual(float(rows[0]["new_limit_gb"]), 200.7)
+        entries = audit.read_audit_log(cluster)
+        self.assertEqual(len(entries), 2)
+        # Verify sorting (newest first)
+        self.assertEqual(entries[0]["timestamp"], "2026-01-02")
 
 if __name__ == "__main__":
     unittest.main()

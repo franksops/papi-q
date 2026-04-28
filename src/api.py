@@ -32,19 +32,15 @@ class QuotaEntry:
     
     @property
     def usage_percent(self) -> float:
-        """Calculate usage percentage."""
         if self.hard_limit_bytes == 0:
             return 0.0
         return (self.usage_bytes / self.hard_limit_bytes) * 100
     
     @property
     def status(self) -> Status:
-        """Determine quota status."""
         pct = self.usage_percent
-        if pct > 95:
-            return Status.CRITICAL
-        elif pct >= 80:
-            return Status.WARNING
+        if pct > 95: return Status.CRITICAL
+        if pct >= 80: return Status.WARNING
         return Status.HEALTHY
     
     @property
@@ -60,7 +56,6 @@ class QuotaEntry:
         return self.usage_bytes / (1024 ** 3)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for UI display."""
         return {
             "id": self.id,
             "path": self.path,
@@ -79,13 +74,7 @@ class QuotaEntry:
 class IsilonAPI:
     """Wrapper for Isilon SDK API interactions."""
     
-    def __init__(
-        self,
-        cluster_url: str,
-        username: str,
-        password: str,
-        verify_ssl: bool = True,
-    ):
+    def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = cluster_url.rstrip("/")
         self.username = username
         self.password = password
@@ -94,7 +83,7 @@ class IsilonAPI:
         try:
             import isi_sdk
             self.sdk = isi_sdk
-            # Target v9_12_0 models specifically
+            # Dynamically load models
             try:
                 from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
                 from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
@@ -122,7 +111,6 @@ class IsilonAPI:
         self.snapshot_api = self.sdk.SnapshotApi(api_client)
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
-        """Helper to map PAPI quota response to internal QuotaEntry."""
         return QuotaEntry(
             id=q.id,
             path=q.path,
@@ -136,59 +124,44 @@ class IsilonAPI:
         )
 
     def get_protocol_mapping(self, access_zone: str = "System") -> Dict[str, str]:
-        """Map paths to protocols (SMB/NFS)."""
         mapping = {}
         try:
             smb = self.shares_api.list_smb_shares(zone=access_zone)
-            for s in smb.shares:
-                mapping[s.path] = "SMB"
-            
+            for s in smb.shares: mapping[s.path] = "SMB"
             nfs = self.protocols_api.list_nfs_exports(zone=access_zone)
             for e in nfs.exports:
-                for p in e.paths:
-                    mapping[p] = (mapping.get(p, "") + ", NFS").lstrip(", ")
-        except Exception:
-            pass
+                for p in e.paths: mapping[p] = (mapping.get(p, "") + ", NFS").lstrip(", ")
+        except Exception: pass
         return mapping
 
-    def list_quotas(
-        self,
-        path: Optional[str] = None,
-        access_zone: Optional[str] = None,
-        limit: int = 1000,
-        continue_token: Optional[str] = None,
-    ) -> Tuple[List[QuotaEntry], Optional[str]]:
-        """List quotas with pagination."""
+    def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
             if access_zone: params["zones"] = access_zone
-            if continue_token: params["continue"] = continue_token
-            
+            if token: params["continue"] = token
             resp = self.quota_api.list_quotas(**params)
             return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        """Fetch all quotas following continue tokens."""
-        all_q = []
-        token = None
+        all_q, token = [], None
         while True:
-            qs, token = self.list_quotas(path, access_zone, continue_token=token)
+            qs, token = self.list_quotas(path, access_zone, token=token)
             all_q.extend(qs)
-            if not token or len(all_q) > 10000: break # Safety cap
+            if not token or len(all_q) > 10000: break
         return all_q
 
     def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Update any quota field dynamically."""
+        """Update any quota field dynamically. Handles nested limits object."""
         try:
             update_obj = self._models["entry"]()
             for k, v in payload.items():
                 if k == "limits" and isinstance(v, dict):
                     lims = self._models["limits"]()
                     for lk, lv in v.items():
-                        if hasattr(lims, lk): setattr(lims, lk, int(lv))
+                        if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
                     setattr(update_obj, k, lims)
                 elif hasattr(update_obj, k):
                     setattr(update_obj, k, v)
@@ -196,20 +169,26 @@ class IsilonAPI:
             resp = self.quota_api.update_quota_entry(quota_id, update_obj)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e:
-            raise RuntimeError(f"Dynamic Update Failed: {e}")
+            raise RuntimeError(f"Update Failed: {e}")
 
-    def create_quota(self, path: str, type: str, hard_gb: float, access_zone: str = "System") -> str:
-        """Create new quota."""
+    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, include_snapshots: bool = False) -> str:
+        """Create new quota with comprehensive parameters."""
         try:
-            lims = self._models["limits"](hard=int(round(hard_gb * (1024**3))))
-            q = self._models["quota"](path=path, type=type, limits=lims, enforced=True, zone=access_zone)
-            resp = self.quota_api.create_quota(q)
+            q_limits = self._models["limits"](
+                hard=int(round(limits.get("hard", 0) * (1024**3))),
+                soft=int(round(limits.get("soft", 0) * (1024**3))),
+                advisory=int(round(limits.get("advisory", 0) * (1024**3)))
+            )
+            q_body = self._models["quota"](
+                path=path, type=q_type, limits=q_limits, 
+                enforced=enforced, include_snapshots=include_snapshots, zone=access_zone
+            )
+            resp = self.quota_api.create_quota(q_body)
             return resp.id
         except Exception as e:
             raise RuntimeError(f"Create Failed: {e}")
 
     def delete_quota(self, quota_id: str) -> bool:
-        """Delete quota entry."""
         try:
             self.quota_api.delete_quota_entry(quota_id)
             return True
@@ -217,30 +196,24 @@ class IsilonAPI:
             raise RuntimeError(f"Delete Failed: {e}")
 
     def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
-        """List associated snapshots."""
         try:
             resp = self.snapshot_api.list_snapshots(path=path)
             return [{
                 "id": s.id, "name": s.name, 
-                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S'),
+                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
                 "size": getattr(s, "size", 0)
             } for s in resp.snapshots]
-        except Exception:
-            return []
+        except Exception: return []
 
     def get_acl_for_path(self, path: str) -> Dict[str, Any]:
-        """Fetch ACL from Namespace API."""
         try:
             ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
             resp = self.namespaces_api.get_acl(ifs_path)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
-        except Exception as e:
-            return {"error": str(e)}
+        except Exception as e: return {"error": str(e)}
 
     def list_access_zones(self) -> List[str]:
-        """List cluster access zones."""
         try:
             resp = self.namespaces_api.get_access_zones()
             return [z.name for z in resp.access_zones]
-        except Exception:
-            return ["System"]
+        except Exception: return ["System"]

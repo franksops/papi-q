@@ -3,293 +3,247 @@
 import streamlit as st
 from streamlit import session_state as state
 import pandas as pd
+from urllib.parse import urlparse
 
-# Import our modules
+# Import modular logic
 from src.config import load_clusters, add_cluster, remove_cluster
 from src.api import IsilonAPI
 from src.audit import write_audit_entry, read_audit_log
 from src.utils import (
     filter_quotas, get_top_offenders, paginate_list, 
-    status_badge, color_for_status
+    status_badge, color_for_status, bytes_to_gb
 )
 from src.ui.components import (
     render_dynamic_grid, render_snapshot_viewer, render_acl_viewer
 )
 from src.ui.session import init_session, set_api_client, clear_api_client, handle_api_error
 
-# Set page config
 st.set_page_config(page_title="SmartQuota Manager", page_icon="📊", layout="wide")
-
-# Initialize session state
 init_session()
 
-# Custom CSS
+# Theme CSS
 st.markdown("""
 <style>
-    :root { --primary-orange: #F58513; --primary-green: #006837; }
+    :root { --p-orange: #F58513; --p-green: #006837; }
     .stApp { font-family: sans-serif; }
-    h1, h2, h3 { color: var(--primary-green); }
-    .stMetric [data-testid="stMetricValue"] { color: var(--primary-orange) !important; }
+    h1, h2, h3, h4 { color: var(--p-green); }
+    .stMetric [data-testid="stMetricValue"] { color: var(--p-orange) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 def login_section():
-    """Login form sidebar."""
     st.sidebar.header("🔐 Login")
-    clusters = load_clusters()
+    inv = load_clusters()
+    selected = st.sidebar.selectbox("Cluster", options=list(inv.keys()) + ["Custom URL..."], key="selected_cluster_box")
     
-    cluster_names = list(clusters.keys())
-    selected = st.sidebar.selectbox("Select Cluster", options=cluster_names + ["Custom URL..."], key="selected_cluster")
+    url = st.sidebar.text_input("URL", placeholder="https://ip:8080") if selected == "Custom URL..." else inv.get(selected, "")
+    user = st.sidebar.text_input("Username", placeholder="domain\\user")
+    pwd = st.sidebar.text_input("Password", type="password")
+    skip_ssl = st.sidebar.checkbox("Ignore SSL", value=True)
     
-    custom_url = ""
-    if selected == "Custom URL...":
-        custom_url = st.sidebar.text_input("Isilon URL", placeholder="https://isilon.local:8080")
-    
-    username = st.sidebar.text_input("Username", key="login_username", placeholder="domain\\user or user")
-    password = st.sidebar.text_input("Password", type="password", key="login_password")
-    ssl_warning = st.sidebar.checkbox("Ignore SSL Certificate", value=True, key="ssl_setting")
-    
-    if st.sidebar.button("Login", use_container_width=True):
-        if not username or not password:
-            st.sidebar.error("Credentials required")
+    if st.sidebar.button("Connect", use_container_width=True):
+        if not all([url, user, pwd]):
+            st.sidebar.error("Missing fields")
             return
         
-        url = custom_url if selected == "Custom URL..." else clusters[selected]
-        if not url:
-            st.sidebar.error("URL required")
-            return
-
-        # Derive clean hostname for display and logging
-        display_name = selected
-        if selected == "Custom URL...":
-            display_name = url.split("//")[-1].split(":")[0].replace(".", "_")
-        
+        # Robust name derivation
         try:
-            api = IsilonAPI(cluster_url=url, username=username, password=password, verify_ssl=not ssl_warning)
+            p = urlparse(url)
+            host = p.hostname or url.split("//")[-1].split(":")[0]
+            display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
+            
+            api = IsilonAPI(url, user, pwd, verify_ssl=not skip_ssl)
             set_api_client(api)
-            if selected == "Custom URL...":
-                add_cluster(display_name, url)
+            if selected == "Custom URL...": add_cluster(display_name, url)
             
             state.selected_cluster = display_name
-            state.admin_user = username
+            state.admin_user = user
             st.rerun()
         except Exception as e:
-            st.sidebar.error(f"Login failed: {e}")
+            st.sidebar.error(f"Failed: {e}")
 
 
-def logout_section():
-    """Logout button and info."""
-    if state.api_client:
-        st.sidebar.header(f"Connected: {state.selected_cluster}")
-        if st.sidebar.button("🚪 Logout", use_container_width=True):
-            clear_api_client()
-            st.rerun()
-
-
-def cluster_management():
-    """Cluster management sidebar expander."""
-    with st.sidebar.expander("⚙️ Cluster Management", expanded=False):
-        clusters = load_clusters()
-        for name, url in clusters.items():
-            col1, col2 = st.columns([3, 1])
-            col1.caption(f"{name}")
-            if col2.button("🗑️", key=f"del_{name}"):
-                remove_cluster(name)
-                st.rerun()
-        st.divider()
-        new_name = st.text_input("New Name")
-        new_url = st.text_input("New URL", placeholder="https://...")
-        if st.button("Add"):
-            if new_name and new_url:
-                add_cluster(new_name, new_url)
+def sidebar_tools():
+    if not state.api_client: return
+    st.sidebar.header(f"📍 {state.selected_cluster}")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        clear_api_client()
+        st.rerun()
+    
+    with st.sidebar.expander("⚙️ Inventory"):
+        inv = load_clusters()
+        for n, u in inv.items():
+            c1, c2 = st.columns([4, 1])
+            c1.caption(f"{n}")
+            if c2.button("🗑️", key=f"d_{n}"):
+                remove_cluster(n)
                 st.rerun()
 
 
-def main_view():
-    """Main dashboard content."""
+def dashboard():
     if not state.api_client:
         st.title("📊 SmartQuota Manager")
-        st.info("Please login from the sidebar to manage your PowerScale clusters.")
+        st.info("Please login from the sidebar.")
         return
-    
-    st.title(f"📊 {state.selected_cluster}")
-    tabs = st.tabs(["📈 Monitoring", "🔧 Universal Manager", "➕ Create", "📜 Audit Log", "📥 Export"])
+
+    tabs = st.tabs(["📈 Dashboard", "🔧 Universal Manager", "➕ Provision", "📜 Audit History", "📥 Export"])
     
     with tabs[0]: monitoring_tab()
     with tabs[1]: modify_tab()
-    with tabs[2]: create_tab()
+    with tabs[2]: provision_tab()
     with tabs[3]: audit_tab()
     with tabs[4]: export_tab()
 
 
 def monitoring_tab():
-    """Dashboard and search."""
-    st.header("Quota Monitoring")
-    st.info("📖 [Documentation](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)")
-    
+    st.header("Cluster Overview")
     api = state.api_client
-    if "quotas_loaded" not in st.session_state:
-        with st.spinner("Fetching quotas..."):
+    if not state.quotas_loaded:
+        with st.spinner("Loading..."):
             try:
                 state.quotas = api.list_quotas(limit=500)[0]
                 state.quotas_loaded = True
             except Exception as e:
-                if not handle_api_error(e): st.error(f"Load failed: {e}")
+                if not handle_api_error(e): st.error(e)
                 return
 
-    # Top Offenders
-    cats = get_top_offenders(state.quotas)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"<h4 style='color:#D72638'>🔴 Critical (>95%)</h4>", unsafe_allow_html=True)
-        for i in cats["critical"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
-    with col2:
-        st.markdown(f"<h4 style='color:#F58513'>🟡 Warning (>80%)</h4>", unsafe_allow_html=True)
-        for i in cats["warning"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
-    with col3:
-        st.markdown(f"<h4 style='color:#006837'>🟢 Notice (>70%)</h4>", unsafe_allow_html=True)
-        for i in cats["notice"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    off = get_top_offenders(state.quotas)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("<h4 style='color:#D72638'>🔴 Critical</h4>", unsafe_allow_html=True)
+        for i in off["critical"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    with c2:
+        st.markdown("<h4 style='color:#F58513'>🟡 Warning</h4>", unsafe_allow_html=True)
+        for i in off["warning"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    with c3:
+        st.markdown("<h4 style='color:#006837'>🟢 Notice</h4>", unsafe_allow_html=True)
+        for i in off["notice"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
 
     st.divider()
+    sc, zc = st.columns(2)
+    search = sc.text_input("Search Name")
+    zone = zc.selectbox("Zone", ["All"] + api.list_access_zones())
     
-    # Search
-    c1, c2 = st.columns(2)
-    search = c1.text_input("Search Share Name")
-    zone = c2.selectbox("Filter Zone", ["All"] + api.list_access_zones())
-    
-    filtered = filter_quotas(state.quotas, search, zone)
-    
-    # List Table
+    filt = filter_quotas(state.quotas, search, zone)
     page = st.number_input("Page", min_value=1, value=1)
-    items, total = paginate_list(filtered, page)
+    items, total = paginate_list(filt, page)
     
     if items:
-        display_data = []
-        for q in items:
-            display_data.append({
-                "Share": q.path.split("/")[-1],
-                "Zone": q.access_zone,
-                "Path": q.path,
-                "Usage %": f"{q.usage_percent:.1f}%",
-                "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
-            })
-        st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
-        
-        # Selection
-        selected = st.multiselect("Focus on share for Universal Manager", 
-                                  options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items], 
-                                  key="selected_paths")
-        state.selected_quota_paths = selected
-    else:
-        st.info("No matching quotas found.")
+        df = pd.DataFrame([{
+            "Share": q.path.split("/")[-1], "Zone": q.access_zone, "Path": q.path,
+            "Usage %": f"{q.usage_percent:.1f}%", "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+        } for q in items])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        state.selected_quota_paths = st.multiselect("Select share to manage", 
+                                                    options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
+                                                    max_selections=1)
+    else: st.info("No records.")
 
 
 def modify_tab():
-    """Universal Manager with Dynamic Grid."""
-    st.header("Universal Object Manager 🛠️")
-    with st.expander("📖 API Resources"):
-        st.caption("Links to Dell Portal for Quotas, Snapshots, and ACLs.")
-    
-    if not state.api_client: return
-    if "selected_quota_paths" not in state or not state.selected_quota_paths:
-        st.info("Select a quota from Monitoring to begin.")
+    st.header("Universal Manager 🛠️")
+    if not state.selected_quota_paths:
+        st.info("Select a quota from the Dashboard.")
         return
     
-    # Find active quota
-    path_str = state.selected_quota_paths[0]
-    quota = next((q for q in state.quotas if f"{q.path} ({q.usage_percent:.1f}%)" == path_str), None)
+    path_key = state.selected_quota_paths[0]
+    quota = next((q for q in state.quotas if f"{q.path} ({q.usage_percent:.1f}%)" == path_key), None)
     if not quota: return
 
-    st.subheader(f"📁 {quota.path}")
-    t1, t2, t3 = st.tabs(["⚙️ Settings", "📸 Snapshots", "🔒 Permissions"])
-    
     api = state.api_client
+    st.subheader(f"📁 {quota.path}")
+    t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
+    
     with t1:
         try:
             raw = api.quota_api.get_quota_entry(quota.id).to_dict()
-            with st.form(f"f_{quota.id}"):
-                payload = render_dynamic_grid(raw, f"ed_{quota.id}")
+            with st.form(f"u_{quota.id}"):
+                payload = render_dynamic_grid(raw, f"e_{quota.id}")
                 st.divider()
-                if st.form_submit_button("APPLY CHANGES", type="primary"):
+                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary"):
                     if payload:
-                        api.update_quota_dynamic(quota.id, payload)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DYNAMIC_MODIFY", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
-                        st.success("Updated!")
-                        if "quotas_loaded" in state: del state.quotas_loaded
+                        updated = api.update_quota_dynamic(quota.id, payload)
+                        new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0))
+                        write_audit_entry(state.admin_user, state.selected_cluster, "UPDATE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
+                        st.success("Updated successfully.")
+                        state.quotas_loaded = False
                         st.rerun()
             
-            # Delete
-            with st.expander("🗑️ Decommission"):
-                if st.text_input("Type DELETE") == "DELETE":
-                    if st.button("CONFIRM DELETE"):
+            with st.expander("🗑️ Danger Zone"):
+                st.error("Permanent Deletion")
+                if st.text_input("Type 'DELETE'", key=f"d_tx_{quota.id}") == "DELETE":
+                    if st.button("CONFIRM DELETE", key=f"d_bt_{quota.id}"):
                         api.delete_quota(quota.id)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, 0, 0)
+                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
+                        state.quotas_loaded = False
                         st.rerun()
         except Exception as e:
             if not handle_api_error(e): st.error(f"Error: {e}")
 
-    with t2:
-        render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
-    
-    with t3:
-        render_acl_viewer(api.get_acl_for_path(quota.path))
+    with t2: render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
+    with t3: render_acl_viewer(api.get_acl_for_path(quota.path))
 
 
-def create_tab():
-    """Quota Provisioning."""
-    st.header("Provision New Quota ➕")
-    if not state.api_client: return
-    
-    with st.form("c_form"):
-        path = st.text_input("Path", placeholder="/ifs/...")
-        q_type = st.selectbox("Type", ["directory", "user", "group"])
-        zone = st.selectbox("Zone", state.api_client.list_access_zones())
-        hard = st.number_input("Hard Limit (GB)", min_value=0.0, step=1.0)
-        if st.form_submit_button("CREATE"):
-            if not path.startswith("/ifs"): st.error("Path error"); return
+def provision_tab():
+    st.header("Provision Quota ➕")
+    api = state.api_client
+    with st.form("p_form"):
+        path = st.text_input("Path", placeholder="/ifs/data/...")
+        col1, col2 = st.columns(2)
+        q_type = col1.selectbox("Type", ["directory", "user", "group", "default-user", "default-group"])
+        zone = col2.selectbox("Access Zone", api.list_access_zones())
+        
+        c1, c2, c3 = st.columns(3)
+        h = c1.number_input("Hard (GB)", min_value=0.0)
+        s = c2.number_input("Soft (GB)", min_value=0.0)
+        a = c3.number_input("Advisory (GB)", min_value=0.0)
+        
+        enforced = st.checkbox("Enforced", value=True)
+        snapshots = st.checkbox("Include Snapshots", value=False)
+        
+        if st.form_submit_button("CREATE QUOTA", type="primary"):
+            if not path.startswith("/ifs"): st.error("Invalid path"); return
             try:
-                state.api_client.create_quota(path, q_type, hard, zone)
-                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, hard)
-                st.success("Created!")
-                if "quotas_loaded" in state: del state.quotas_loaded
+                api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
+                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, h)
+                st.success(f"Quota created on {path}")
+                state.quotas_loaded = False
             except Exception as e:
-                if not handle_api_error(e): st.error(f"Error: {e}")
+                if not handle_api_error(e): st.error(e)
 
 
 def audit_tab():
-    """Audit view."""
-    st.header(f"Audit Log: {state.selected_cluster}")
-    entries = read_audit_log(cluster=state.selected_cluster)
+    st.header("Full Audit History")
+    st.caption("Combined daily logs for the current cluster.")
+    entries = read_audit_log(state.selected_cluster)
     if entries:
         st.dataframe(pd.DataFrame(entries), hide_index=True, use_container_width=True)
-    else:
-        st.info("No entries today.")
+        st.download_button("Download CSV", pd.DataFrame(entries).to_csv(index=False), f"audit_{state.selected_cluster}.csv")
+    else: st.info("No logs found.")
 
 
 def export_tab():
-    """Reports."""
-    st.header("Bulk Export")
-    if st.button("Generate All Quotas CSV"):
-        with st.spinner("Processing..."):
-            all_q = state.api_client.list_all_quotas()
-            mapping = state.api_client.get_protocol_mapping()
-            data = []
-            for q in all_q:
-                d = q.to_dict()
-                d["Protocol"] = mapping.get(q.path, "-")
-                data.append(d)
-            st.download_button("Download CSV", pd.DataFrame(data).to_csv(index=False), "export.csv")
+    st.header("Reporting")
+    if st.button("Generate Full CSV Report"):
+        with st.spinner("Processing large dataset..."):
+            try:
+                qs = state.api_client.list_all_quotas()
+                mapping = state.api_client.get_protocol_mapping()
+                data = []
+                for q in qs:
+                    d = q.to_dict()
+                    d["Protocol"] = mapping.get(q.path, "-")
+                    data.append(d)
+                st.download_button("Download", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
+            except Exception as e: st.error(e)
 
 
 def main():
-    """App entry."""
-    if state.api_client:
-        logout_section()
-        cluster_management()
-    else:
+    if not state.api_client:
         login_section()
-    main_view()
+    else:
+        sidebar_tools()
+    dashboard()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

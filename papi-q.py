@@ -217,19 +217,15 @@ class QuotaEntry:
     
     @property
     def usage_percent(self) -> float:
-        """Calculate usage percentage."""
         if self.hard_limit_bytes == 0:
             return 0.0
         return (self.usage_bytes / self.hard_limit_bytes) * 100
     
     @property
     def status(self) -> Status:
-        """Determine quota status."""
         pct = self.usage_percent
-        if pct > 95:
-            return Status.CRITICAL
-        elif pct >= 80:
-            return Status.WARNING
+        if pct > 95: return Status.CRITICAL
+        if pct >= 80: return Status.WARNING
         return Status.HEALTHY
     
     @property
@@ -245,7 +241,6 @@ class QuotaEntry:
         return self.usage_bytes / (1024 ** 3)
     
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary for UI display."""
         return {
             "id": self.id,
             "path": self.path,
@@ -264,13 +259,7 @@ class QuotaEntry:
 class IsilonAPI:
     """Wrapper for Isilon SDK API interactions."""
     
-    def __init__(
-        self,
-        cluster_url: str,
-        username: str,
-        password: str,
-        verify_ssl: bool = True,
-    ):
+    def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
         self.cluster_url = cluster_url.rstrip("/")
         self.username = username
         self.password = password
@@ -279,7 +268,7 @@ class IsilonAPI:
         try:
             import isi_sdk
             self.sdk = isi_sdk
-            # Target v9_12_0 models specifically
+            # Dynamically load models
             try:
                 from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
                 from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
@@ -307,7 +296,6 @@ class IsilonAPI:
         self.snapshot_api = self.sdk.SnapshotApi(api_client)
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
-        """Helper to map PAPI quota response to internal QuotaEntry."""
         return QuotaEntry(
             id=q.id,
             path=q.path,
@@ -321,59 +309,44 @@ class IsilonAPI:
         )
 
     def get_protocol_mapping(self, access_zone: str = "System") -> Dict[str, str]:
-        """Map paths to protocols (SMB/NFS)."""
         mapping = {}
         try:
             smb = self.shares_api.list_smb_shares(zone=access_zone)
-            for s in smb.shares:
-                mapping[s.path] = "SMB"
-            
+            for s in smb.shares: mapping[s.path] = "SMB"
             nfs = self.protocols_api.list_nfs_exports(zone=access_zone)
             for e in nfs.exports:
-                for p in e.paths:
-                    mapping[p] = (mapping.get(p, "") + ", NFS").lstrip(", ")
-        except Exception:
-            pass
+                for p in e.paths: mapping[p] = (mapping.get(p, "") + ", NFS").lstrip(", ")
+        except Exception: pass
         return mapping
 
-    def list_quotas(
-        self,
-        path: Optional[str] = None,
-        access_zone: Optional[str] = None,
-        limit: int = 1000,
-        continue_token: Optional[str] = None,
-    ) -> Tuple[List[QuotaEntry], Optional[str]]:
-        """List quotas with pagination."""
+    def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
             if path: params["path"] = path
             if access_zone: params["zones"] = access_zone
-            if continue_token: params["continue"] = continue_token
-            
+            if token: params["continue"] = token
             resp = self.quota_api.list_quotas(**params)
             return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
-        """Fetch all quotas following continue tokens."""
-        all_q = []
-        token = None
+        all_q, token = [], None
         while True:
-            qs, token = self.list_quotas(path, access_zone, continue_token=token)
+            qs, token = self.list_quotas(path, access_zone, token=token)
             all_q.extend(qs)
-            if not token or len(all_q) > 10000: break # Safety cap
+            if not token or len(all_q) > 10000: break
         return all_q
 
     def update_quota_dynamic(self, quota_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        """Update any quota field dynamically."""
+        """Update any quota field dynamically. Handles nested limits object."""
         try:
             update_obj = self._models["entry"]()
             for k, v in payload.items():
                 if k == "limits" and isinstance(v, dict):
                     lims = self._models["limits"]()
                     for lk, lv in v.items():
-                        if hasattr(lims, lk): setattr(lims, lk, int(lv))
+                        if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
                     setattr(update_obj, k, lims)
                 elif hasattr(update_obj, k):
                     setattr(update_obj, k, v)
@@ -381,20 +354,26 @@ class IsilonAPI:
             resp = self.quota_api.update_quota_entry(quota_id, update_obj)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e:
-            raise RuntimeError(f"Dynamic Update Failed: {e}")
+            raise RuntimeError(f"Update Failed: {e}")
 
-    def create_quota(self, path: str, type: str, hard_gb: float, access_zone: str = "System") -> str:
-        """Create new quota."""
+    def create_quota(self, path: str, q_type: str, limits: Dict[str, float], access_zone: str = "System", enforced: bool = True, include_snapshots: bool = False) -> str:
+        """Create new quota with comprehensive parameters."""
         try:
-            lims = self._models["limits"](hard=int(round(hard_gb * (1024**3))))
-            q = self._models["quota"](path=path, type=type, limits=lims, enforced=True, zone=access_zone)
-            resp = self.quota_api.create_quota(q)
+            q_limits = self._models["limits"](
+                hard=int(round(limits.get("hard", 0) * (1024**3))),
+                soft=int(round(limits.get("soft", 0) * (1024**3))),
+                advisory=int(round(limits.get("advisory", 0) * (1024**3)))
+            )
+            q_body = self._models["quota"](
+                path=path, type=q_type, limits=q_limits, 
+                enforced=enforced, include_snapshots=include_snapshots, zone=access_zone
+            )
+            resp = self.quota_api.create_quota(q_body)
             return resp.id
         except Exception as e:
             raise RuntimeError(f"Create Failed: {e}")
 
     def delete_quota(self, quota_id: str) -> bool:
-        """Delete quota entry."""
         try:
             self.quota_api.delete_quota_entry(quota_id)
             return True
@@ -402,43 +381,37 @@ class IsilonAPI:
             raise RuntimeError(f"Delete Failed: {e}")
 
     def get_snapshots_for_path(self, path: str) -> List[Dict[str, Any]]:
-        """List associated snapshots."""
         try:
             resp = self.snapshot_api.list_snapshots(path=path)
             return [{
                 "id": s.id, "name": s.name, 
-                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S'),
+                "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
                 "size": getattr(s, "size", 0)
             } for s in resp.snapshots]
-        except Exception:
-            return []
+        except Exception: return []
 
     def get_acl_for_path(self, path: str) -> Dict[str, Any]:
-        """Fetch ACL from Namespace API."""
         try:
             ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
             resp = self.namespaces_api.get_acl(ifs_path)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
-        except Exception as e:
-            return {"error": str(e)}
+        except Exception as e: return {"error": str(e)}
 
     def list_access_zones(self) -> List[str]:
-        """List cluster access zones."""
         try:
             resp = self.namespaces_api.get_access_zones()
             return [z.name for z in resp.access_zones]
-        except Exception:
-            return ["System"]
+        except Exception: return ["System"]
 
 
 # --- Source: src/audit.py ---
 
 
 import csv
+import glob
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-
 
 
 
@@ -462,24 +435,14 @@ def write_audit_entry(
     path: str,
     old_limit_gb: float,
     new_limit_gb: float,
-    log_file: Optional[str] = None,
 ) -> bool:
-    """
-    Write an audit log entry for a quota modification.
-    """
-    if log_file is None:
-        # Create cluster-specific audit log file in the config directory
-        from src.config import DEFAULT_CONFIG_DIR
-        safe_cluster_name = "".join([c if c.isalnum() else "_" for c in cluster])
-        datestamp = datetime.now().strftime("%m%d%Y")
-        log_file = str(DEFAULT_CONFIG_DIR / f"{safe_cluster_name}_{datestamp}.csv")
+    """Write an audit log entry for a quota modification with daily rotation."""
+    safe_name = "".join([c if c.isalnum() else "_" for c in cluster])
+    datestamp = datetime.now().strftime("%m%d%Y")
+    log_file = DEFAULT_CONFIG_DIR / f"{safe_name}_{datestamp}.csv"
     
-    log_path = Path(log_file)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     
-    # Ensure parent directory exists
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Build entry
     entry = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "admin": admin,
@@ -487,88 +450,42 @@ def write_audit_entry(
         "action": action,
         "share_name": share_name,
         "path": path,
-        "old_limit_gb": old_limit_gb,
-        "new_limit_gb": new_limit_gb,
+        "old_limit_gb": round(old_limit_gb, 2),
+        "new_limit_gb": round(new_limit_gb, 2),
     }
     
     try:
-        file_exists = log_path.exists()
-        with open(log_path, "a", newline="") as f:
+        exists = log_file.exists()
+        with open(log_file, "a", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=AUDIT_FIELDS)
-            if not file_exists:
-                writer.writeheader()
+            if not exists: writer.writeheader()
             writer.writerow(entry)
         return True
     except Exception as e:
-        # Log to stderr for visibility
         print(f"AUDIT ERROR: {e}", flush=True)
         return False
 
 
-def read_audit_log(
-    cluster: Optional[str] = None,
-    share_name: Optional[str] = None,
-    start_date: Optional[str] = None,
-    end_date: Optional[str] = None,
-    log_file: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Read audit log entries. Since logs are now daily, this reads the current day's log by default.
-    """
-    if log_file is None:
-        if cluster:
-            from src.config import DEFAULT_CONFIG_DIR
-            safe_cluster_name = "".join([c if c.isalnum() else "_" for c in cluster])
-            datestamp = datetime.now().strftime("%m%d%Y")
-            log_file = str(DEFAULT_CONFIG_DIR / f"{safe_cluster_name}_{datestamp}.csv")
-        else:
-            log_file = load_config().get("log_file", str(DEFAULT_AUDIT_LOG))
+def read_audit_log(cluster: str) -> List[Dict[str, Any]]:
+    """Read full audit history for a cluster by globbing all daily files."""
+    safe_name = "".join([c if c.isalnum() else "_" for c in cluster])
+    pattern = str(DEFAULT_CONFIG_DIR / f"{safe_name}_*.csv")
     
-    log_path = Path(log_file)
-    if not log_path.exists():
-        return []
-    
+    files = glob.glob(pattern)
     results = []
-    try:
-        with open(log_path, "r") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                # Apply filters
-                if cluster and row.get("cluster") and row["cluster"] != cluster:
-                    continue
-                if share_name and row.get("share_name") and share_name.lower() not in row["share_name"].lower():
-                    continue
-                
-                # Convert numeric fields
-                row["old_limit_gb"] = float(row["old_limit_gb"]) if row.get("old_limit_gb") else 0.0
-                row["new_limit_gb"] = float(row["new_limit_gb"]) if row.get("new_limit_gb") else 0.0
-                
-                results.append(row)
+    
+    for f_path in files:
+        try:
+            with open(f_path, "r") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    row["old_limit_gb"] = float(row["old_limit_gb"]) if row.get("old_limit_gb") else 0.0
+                    row["new_limit_gb"] = float(row["new_limit_gb"]) if row.get("new_limit_gb") else 0.0
+                    results.append(row)
+        except Exception: continue
         
-        # Sort by timestamp (newest first for reading)
-        results.sort(key=lambda x: x["timestamp"], reverse=True)
-        return results
-    except Exception as e:
-        print(f"READ AUDIT ERROR: {e}", flush=True)
-        return []
-
-
-def get_top_modifications(
-    limit: int = 10,
-    log_file: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Get the most recent modifications from the audit log.
-    
-    Args:
-        limit: Maximum number of entries to return
-        log_file: Path to audit log file
-    
-    Returns:
-        List of most recent audit entries
-    """
-    entries = read_audit_log(log_file=log_file)
-    return entries[-limit:] if entries else []
+    results.sort(key=lambda x: x["timestamp"], reverse=True)
+    return results
 
 
 # --- Source: src/utils.py ---
@@ -676,87 +593,46 @@ def paginate_list(items: List[Any], page: int, page_size: int = 25) -> Tuple[Lis
 
 
 import streamlit as st
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 
 
 def init_session() -> None:
-    """Initialize session state variables."""
-    if "api_client" not in st.session_state:
-        st.session_state.api_client = None
-    
-    if "_clusters" not in st.session_state:
-        st.session_state.clusters = {}
-    
-    if "current_cluster" not in st.session_state:
-        st.session_state.current_cluster = None
-    
-    if "last_quota_list" not in st.session_state:
-        st.session_state.last_quota_list = []
-    
-    if "selected_quotas" not in st.session_state:
-        st.session_state.selected_quotas = []
-    
-    if "quota_cache" not in st.session_state:
-        st.session_state.quota_cache = {}
-    
-    if "audit_log" not in st.session_state:
-        st.session_state.audit_log = []
-    
-    if "admin_user" not in st.session_state:
-        st.session_state.admin_user = None
-    
-    if "clusters_modified" not in st.session_state:
-        st.session_state.clusters_modified = False
-
-
-def get_api_client() -> Optional[Any]:
-    """Get the current API client from session state."""
-    return st.session_state.api_client
+    """Initialize essential session state variables."""
+    defaults = {
+        "api_client": None,
+        "selected_cluster": None,
+        "admin_user": None,
+        "quotas": [],
+        "quotas_loaded": False,
+        "selected_quota_paths": []
+    }
+    for key, val in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = val
 
 
 def set_api_client(client: Any) -> None:
-    """Set the API client in session state."""
     st.session_state.api_client = client
 
 
 def clear_api_client() -> None:
-    """Clear the API client (logout)."""
     st.session_state.api_client = None
-    st.session_state.current_cluster = None
+    st.session_state.selected_cluster = None
     st.session_state.admin_user = None
-    st.session_state.last_quota_list = []
-    st.session_state.selected_quotas = []
+    st.session_state.quotas = []
+    st.session_state.quotas_loaded = False
+    st.session_state.selected_quota_paths = []
 
 
 def handle_api_error(error: Exception) -> bool:
-    """
-    Handle API errors, specifically 401 Unauthorized.
-    Returns True if session was cleared.
-    """
-    error_str = str(error).lower()
-    if "401" in error_str or "unauthorized" in error_str or "invalid credentials" in error_str:
+    """Handle 401 errors and auto-logout."""
+    err = str(error).lower()
+    if any(x in err for x in ["401", "unauthorized", "invalid credentials"]):
         clear_api_client()
-        st.error("🔒 Session expired or unauthorized. Please login again.")
+        st.error("🔒 Session expired. Please login again.")
         st.rerun()
         return True
     return False
-
-
-def get_selected_quotas() -> list:
-    """Get currently selected quotas."""
-    return st.session_state.selected_quotas
-
-
-def set_selected_quotas(quotas: list) -> None:
-    """Set selected quotas."""
-    st.session_state.selected_quotas = quotas
-
-
-def get_cluster_name() -> Optional[str]:
-    """Get current cluster name from URL."""
-    if st.session_state.current_cluster:
-        return st.session_state.current_cluster.split("://")[-1]
-    return None
 
 
 # --- Source: src/ui/components.py ---
@@ -765,8 +641,6 @@ def get_cluster_name() -> Optional[str]:
 import streamlit as st
 import pandas as pd
 from typing import List, Dict, Any
-
-
 
 
 
@@ -863,332 +737,256 @@ def render_acl_viewer(acl: Dict[str, Any]):
             st.markdown(f"**{trustee}** ({type_}): `{access}`")
 
 
-def create_modification_form(
-    quota: QuotaEntry,
-    key_prefix: str = "modify_form",
-) -> Dict[str, Any]:
-    """Create a form for simple limit modifications."""
-    st.subheader(f"Modify Quota: {quota.path}")
-    
-    with st.form(key=f"{key_prefix}_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            new_hard = st.number_input("New Hard Limit (GB)", min_value=0.0, value=quota.hard_limit_gb, step=1.0)
-            if new_hard > 0 and new_hard < quota.usage_gb:
-                st.error(f"⚠️ Warning: Limit ({new_hard:.2f} GB) < current usage ({quota.usage_gb:.2f} GB)")
-        
-        with col2:
-            new_soft = st.number_input("New Soft Limit (GB)", min_value=0.0, value=quota.soft_limit_gb, step=1.0)
-        
-        apply_to_children = st.checkbox("Apply to child quotas", value=False)
-        confirm = st.checkbox("I confirm this production change", value=False)
-        submitted = st.form_submit_button("APPLY LIMITS", use_container_width=True)
-    
-    if submitted and confirm:
-        return {
-            "hard_limit_gb": new_hard,
-            "soft_limit_gb": new_soft,
-            "apply_to_children": apply_to_children,
-        }
-    return None
-
-
 # --- Source: src/main.py ---
 
 
 import streamlit as st
 from streamlit import session_state as state
 import pandas as pd
+from urllib.parse import urlparse
 
-# Import our modules
+# Import modular logic
 
 
 
 
     filter_quotas, get_top_offenders, paginate_list, 
-    status_badge, color_for_status
+    status_badge, color_for_status, bytes_to_gb
 )
 
     render_dynamic_grid, render_snapshot_viewer, render_acl_viewer
 )
 
 
-# Set page config
 st.set_page_config(page_title="SmartQuota Manager", page_icon="📊", layout="wide")
-
-# Initialize session state
 init_session()
 
-# Custom CSS
+# Theme CSS
 st.markdown("""
 <style>
-    :root { --primary-orange: #F58513; --primary-green: #006837; }
+    :root { --p-orange: #F58513; --p-green: #006837; }
     .stApp { font-family: sans-serif; }
-    h1, h2, h3 { color: var(--primary-green); }
-    .stMetric [data-testid="stMetricValue"] { color: var(--primary-orange) !important; }
+    h1, h2, h3, h4 { color: var(--p-green); }
+    .stMetric [data-testid="stMetricValue"] { color: var(--p-orange) !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
 def login_section():
-    """Login form sidebar."""
     st.sidebar.header("🔐 Login")
-    clusters = load_clusters()
+    inv = load_clusters()
+    selected = st.sidebar.selectbox("Cluster", options=list(inv.keys()) + ["Custom URL..."], key="selected_cluster_box")
     
-    cluster_names = list(clusters.keys())
-    selected = st.sidebar.selectbox("Select Cluster", options=cluster_names + ["Custom URL..."], key="selected_cluster")
+    url = st.sidebar.text_input("URL", placeholder="https://ip:8080") if selected == "Custom URL..." else inv.get(selected, "")
+    user = st.sidebar.text_input("Username", placeholder="domain\\user")
+    pwd = st.sidebar.text_input("Password", type="password")
+    skip_ssl = st.sidebar.checkbox("Ignore SSL", value=True)
     
-    custom_url = ""
-    if selected == "Custom URL...":
-        custom_url = st.sidebar.text_input("Isilon URL", placeholder="https://isilon.local:8080")
-    
-    username = st.sidebar.text_input("Username", key="login_username", placeholder="domain\\user or user")
-    password = st.sidebar.text_input("Password", type="password", key="login_password")
-    ssl_warning = st.sidebar.checkbox("Ignore SSL Certificate", value=True, key="ssl_setting")
-    
-    if st.sidebar.button("Login", use_container_width=True):
-        if not username or not password:
-            st.sidebar.error("Credentials required")
+    if st.sidebar.button("Connect", use_container_width=True):
+        if not all([url, user, pwd]):
+            st.sidebar.error("Missing fields")
             return
         
-        url = custom_url if selected == "Custom URL..." else clusters[selected]
-        if not url:
-            st.sidebar.error("URL required")
-            return
-
-        # Derive clean hostname for display and logging
-        display_name = selected
-        if selected == "Custom URL...":
-            display_name = url.split("//")[-1].split(":")[0].replace(".", "_")
-        
+        # Robust name derivation
         try:
-            api = IsilonAPI(cluster_url=url, username=username, password=password, verify_ssl=not ssl_warning)
+            p = urlparse(url)
+            host = p.hostname or url.split("//")[-1].split(":")[0]
+            display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
+            
+            api = IsilonAPI(url, user, pwd, verify_ssl=not skip_ssl)
             set_api_client(api)
-            if selected == "Custom URL...":
-                add_cluster(display_name, url)
+            if selected == "Custom URL...": add_cluster(display_name, url)
             
             state.selected_cluster = display_name
-            state.admin_user = username
+            state.admin_user = user
             st.rerun()
         except Exception as e:
-            st.sidebar.error(f"Login failed: {e}")
+            st.sidebar.error(f"Failed: {e}")
 
 
-def logout_section():
-    """Logout button and info."""
-    if state.api_client:
-        st.sidebar.header(f"Connected: {state.selected_cluster}")
-        if st.sidebar.button("🚪 Logout", use_container_width=True):
-            clear_api_client()
-            st.rerun()
-
-
-def cluster_management():
-    """Cluster management sidebar expander."""
-    with st.sidebar.expander("⚙️ Cluster Management", expanded=False):
-        clusters = load_clusters()
-        for name, url in clusters.items():
-            col1, col2 = st.columns([3, 1])
-            col1.caption(f"{name}")
-            if col2.button("🗑️", key=f"del_{name}"):
-                remove_cluster(name)
-                st.rerun()
-        st.divider()
-        new_name = st.text_input("New Name")
-        new_url = st.text_input("New URL", placeholder="https://...")
-        if st.button("Add"):
-            if new_name and new_url:
-                add_cluster(new_name, new_url)
+def sidebar_tools():
+    if not state.api_client: return
+    st.sidebar.header(f"📍 {state.selected_cluster}")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        clear_api_client()
+        st.rerun()
+    
+    with st.sidebar.expander("⚙️ Inventory"):
+        inv = load_clusters()
+        for n, u in inv.items():
+            c1, c2 = st.columns([4, 1])
+            c1.caption(f"{n}")
+            if c2.button("🗑️", key=f"d_{n}"):
+                remove_cluster(n)
                 st.rerun()
 
 
-def main_view():
-    """Main dashboard content."""
+def dashboard():
     if not state.api_client:
         st.title("📊 SmartQuota Manager")
-        st.info("Please login from the sidebar to manage your PowerScale clusters.")
+        st.info("Please login from the sidebar.")
         return
-    
-    st.title(f"📊 {state.selected_cluster}")
-    tabs = st.tabs(["📈 Monitoring", "🔧 Universal Manager", "➕ Create", "📜 Audit Log", "📥 Export"])
+
+    tabs = st.tabs(["📈 Dashboard", "🔧 Universal Manager", "➕ Provision", "📜 Audit History", "📥 Export"])
     
     with tabs[0]: monitoring_tab()
     with tabs[1]: modify_tab()
-    with tabs[2]: create_tab()
+    with tabs[2]: provision_tab()
     with tabs[3]: audit_tab()
     with tabs[4]: export_tab()
 
 
 def monitoring_tab():
-    """Dashboard and search."""
-    st.header("Quota Monitoring")
-    st.info("📖 [Documentation](https://developer.dell.com/apis/4357/versions/9.12.0/docs/Introduction.md)")
-    
+    st.header("Cluster Overview")
     api = state.api_client
-    if "quotas_loaded" not in st.session_state:
-        with st.spinner("Fetching quotas..."):
+    if not state.quotas_loaded:
+        with st.spinner("Loading..."):
             try:
                 state.quotas = api.list_quotas(limit=500)[0]
                 state.quotas_loaded = True
             except Exception as e:
-                if not handle_api_error(e): st.error(f"Load failed: {e}")
+                if not handle_api_error(e): st.error(e)
                 return
 
-    # Top Offenders
-    cats = get_top_offenders(state.quotas)
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"<h4 style='color:#D72638'>🔴 Critical (>95%)</h4>", unsafe_allow_html=True)
-        for i in cats["critical"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
-    with col2:
-        st.markdown(f"<h4 style='color:#F58513'>🟡 Warning (>80%)</h4>", unsafe_allow_html=True)
-        for i in cats["warning"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
-    with col3:
-        st.markdown(f"<h4 style='color:#006837'>🟢 Notice (>70%)</h4>", unsafe_allow_html=True)
-        for i in cats["notice"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    off = get_top_offenders(state.quotas)
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("<h4 style='color:#D72638'>🔴 Critical</h4>", unsafe_allow_html=True)
+        for i in off["critical"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    with c2:
+        st.markdown("<h4 style='color:#F58513'>🟡 Warning</h4>", unsafe_allow_html=True)
+        for i in off["warning"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
+    with c3:
+        st.markdown("<h4 style='color:#006837'>🟢 Notice</h4>", unsafe_allow_html=True)
+        for i in off["notice"][:3]: st.caption(f"{i['share_name']}: {i['usage_percent']}%")
 
     st.divider()
+    sc, zc = st.columns(2)
+    search = sc.text_input("Search Name")
+    zone = zc.selectbox("Zone", ["All"] + api.list_access_zones())
     
-    # Search
-    c1, c2 = st.columns(2)
-    search = c1.text_input("Search Share Name")
-    zone = c2.selectbox("Filter Zone", ["All"] + api.list_access_zones())
-    
-    filtered = filter_quotas(state.quotas, search, zone)
-    
-    # List Table
+    filt = filter_quotas(state.quotas, search, zone)
     page = st.number_input("Page", min_value=1, value=1)
-    items, total = paginate_list(filtered, page)
+    items, total = paginate_list(filt, page)
     
     if items:
-        display_data = []
-        for q in items:
-            display_data.append({
-                "Share": q.path.split("/")[-1],
-                "Zone": q.access_zone,
-                "Path": q.path,
-                "Usage %": f"{q.usage_percent:.1f}%",
-                "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
-            })
-        st.dataframe(pd.DataFrame(display_data), use_container_width=True, hide_index=True)
-        
-        # Selection
-        selected = st.multiselect("Focus on share for Universal Manager", 
-                                  options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items], 
-                                  key="selected_paths")
-        state.selected_quota_paths = selected
-    else:
-        st.info("No matching quotas found.")
+        df = pd.DataFrame([{
+            "Share": q.path.split("/")[-1], "Zone": q.access_zone, "Path": q.path,
+            "Usage %": f"{q.usage_percent:.1f}%", "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+        } for q in items])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        state.selected_quota_paths = st.multiselect("Select share to manage", 
+                                                    options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
+                                                    max_selections=1)
+    else: st.info("No records.")
 
 
 def modify_tab():
-    """Universal Manager with Dynamic Grid."""
-    st.header("Universal Object Manager 🛠️")
-    with st.expander("📖 API Resources"):
-        st.caption("Links to Dell Portal for Quotas, Snapshots, and ACLs.")
-    
-    if not state.api_client: return
-    if "selected_quota_paths" not in state or not state.selected_quota_paths:
-        st.info("Select a quota from Monitoring to begin.")
+    st.header("Universal Manager 🛠️")
+    if not state.selected_quota_paths:
+        st.info("Select a quota from the Dashboard.")
         return
     
-    # Find active quota
-    path_str = state.selected_quota_paths[0]
-    quota = next((q for q in state.quotas if f"{q.path} ({q.usage_percent:.1f}%)" == path_str), None)
+    path_key = state.selected_quota_paths[0]
+    quota = next((q for q in state.quotas if f"{q.path} ({q.usage_percent:.1f}%)" == path_key), None)
     if not quota: return
 
-    st.subheader(f"📁 {quota.path}")
-    t1, t2, t3 = st.tabs(["⚙️ Settings", "📸 Snapshots", "🔒 Permissions"])
-    
     api = state.api_client
+    st.subheader(f"📁 {quota.path}")
+    t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
+    
     with t1:
         try:
             raw = api.quota_api.get_quota_entry(quota.id).to_dict()
-            with st.form(f"f_{quota.id}"):
-                payload = render_dynamic_grid(raw, f"ed_{quota.id}")
+            with st.form(f"u_{quota.id}"):
+                payload = render_dynamic_grid(raw, f"e_{quota.id}")
                 st.divider()
-                if st.form_submit_button("APPLY CHANGES", type="primary"):
+                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary"):
                     if payload:
-                        api.update_quota_dynamic(quota.id, payload)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DYNAMIC_MODIFY", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
-                        st.success("Updated!")
-                        if "quotas_loaded" in state: del state.quotas_loaded
+                        updated = api.update_quota_dynamic(quota.id, payload)
+                        new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0))
+                        write_audit_entry(state.admin_user, state.selected_cluster, "UPDATE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
+                        st.success("Updated successfully.")
+                        state.quotas_loaded = False
                         st.rerun()
             
-            # Delete
-            with st.expander("🗑️ Decommission"):
-                if st.text_input("Type DELETE") == "DELETE":
-                    if st.button("CONFIRM DELETE"):
+            with st.expander("🗑️ Danger Zone"):
+                st.error("Permanent Deletion")
+                if st.text_input("Type 'DELETE'", key=f"d_tx_{quota.id}") == "DELETE":
+                    if st.button("CONFIRM DELETE", key=f"d_bt_{quota.id}"):
                         api.delete_quota(quota.id)
-                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, 0, 0)
+                        write_audit_entry(state.admin_user, state.selected_cluster, "DELETE", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, 0)
+                        state.quotas_loaded = False
                         st.rerun()
         except Exception as e:
             if not handle_api_error(e): st.error(f"Error: {e}")
 
-    with t2:
-        render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
-    
-    with t3:
-        render_acl_viewer(api.get_acl_for_path(quota.path))
+    with t2: render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
+    with t3: render_acl_viewer(api.get_acl_for_path(quota.path))
 
 
-def create_tab():
-    """Quota Provisioning."""
-    st.header("Provision New Quota ➕")
-    if not state.api_client: return
-    
-    with st.form("c_form"):
-        path = st.text_input("Path", placeholder="/ifs/...")
-        q_type = st.selectbox("Type", ["directory", "user", "group"])
-        zone = st.selectbox("Zone", state.api_client.list_access_zones())
-        hard = st.number_input("Hard Limit (GB)", min_value=0.0, step=1.0)
-        if st.form_submit_button("CREATE"):
-            if not path.startswith("/ifs"): st.error("Path error"); return
+def provision_tab():
+    st.header("Provision Quota ➕")
+    api = state.api_client
+    with st.form("p_form"):
+        path = st.text_input("Path", placeholder="/ifs/data/...")
+        col1, col2 = st.columns(2)
+        q_type = col1.selectbox("Type", ["directory", "user", "group", "default-user", "default-group"])
+        zone = col2.selectbox("Access Zone", api.list_access_zones())
+        
+        c1, c2, c3 = st.columns(3)
+        h = c1.number_input("Hard (GB)", min_value=0.0)
+        s = c2.number_input("Soft (GB)", min_value=0.0)
+        a = c3.number_input("Advisory (GB)", min_value=0.0)
+        
+        enforced = st.checkbox("Enforced", value=True)
+        snapshots = st.checkbox("Include Snapshots", value=False)
+        
+        if st.form_submit_button("CREATE QUOTA", type="primary"):
+            if not path.startswith("/ifs"): st.error("Invalid path"); return
             try:
-                state.api_client.create_quota(path, q_type, hard, zone)
-                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, hard)
-                st.success("Created!")
-                if "quotas_loaded" in state: del state.quotas_loaded
+                api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
+                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, h)
+                st.success(f"Quota created on {path}")
+                state.quotas_loaded = False
             except Exception as e:
-                if not handle_api_error(e): st.error(f"Error: {e}")
+                if not handle_api_error(e): st.error(e)
 
 
 def audit_tab():
-    """Audit view."""
-    st.header(f"Audit Log: {state.selected_cluster}")
-    entries = read_audit_log(cluster=state.selected_cluster)
+    st.header("Full Audit History")
+    st.caption("Combined daily logs for the current cluster.")
+    entries = read_audit_log(state.selected_cluster)
     if entries:
         st.dataframe(pd.DataFrame(entries), hide_index=True, use_container_width=True)
-    else:
-        st.info("No entries today.")
+        st.download_button("Download CSV", pd.DataFrame(entries).to_csv(index=False), f"audit_{state.selected_cluster}.csv")
+    else: st.info("No logs found.")
 
 
 def export_tab():
-    """Reports."""
-    st.header("Bulk Export")
-    if st.button("Generate All Quotas CSV"):
-        with st.spinner("Processing..."):
-            all_q = state.api_client.list_all_quotas()
-            mapping = state.api_client.get_protocol_mapping()
-            data = []
-            for q in all_q:
-                d = q.to_dict()
-                d["Protocol"] = mapping.get(q.path, "-")
-                data.append(d)
-            st.download_button("Download CSV", pd.DataFrame(data).to_csv(index=False), "export.csv")
+    st.header("Reporting")
+    if st.button("Generate Full CSV Report"):
+        with st.spinner("Processing large dataset..."):
+            try:
+                qs = state.api_client.list_all_quotas()
+                mapping = state.api_client.get_protocol_mapping()
+                data = []
+                for q in qs:
+                    d = q.to_dict()
+                    d["Protocol"] = mapping.get(q.path, "-")
+                    data.append(d)
+                st.download_button("Download", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
+            except Exception as e: st.error(e)
 
 
 def main():
-    """App entry."""
-    if state.api_client:
-        logout_section()
-        cluster_management()
-    else:
+    if not state.api_client:
         login_section()
-    main_view()
+    else:
+        sidebar_tools()
+    dashboard()
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
 
 
 # --- ENTRY POINT ---
