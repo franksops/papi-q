@@ -182,7 +182,7 @@ def modify_tab():
             if not handle_api_error(e): st.error(f"Error: {e}")
 
     with t2: render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
-    with t3: render_acl_viewer(api.get_acl_for_path(quota.path))
+    with t3: render_acl_viewer(api.get_acl_for_path(quota.path, zone=quota.access_zone))
 
 
 def provision_tab():

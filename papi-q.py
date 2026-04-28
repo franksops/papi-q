@@ -265,7 +265,7 @@ class IsilonAPI:
         try:
             import isi_sdk
             self.sdk = isi_sdk
-            # Dynamically load models based on version
+            # Dynamically load models
             try:
                 from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
                 from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
@@ -283,7 +283,7 @@ class IsilonAPI:
         self.configuration.host = self.cluster_url
         self.configuration.username = username
         self.configuration.password = password
-        self.configuration.verify_ssl = verify_ssl
+        self.configuration.verify_ssl = self.verify_ssl
         
         api_client = self.sdk.ApiClient(self.configuration)
         self.quota_api = self.sdk.QuotaApi(api_client)
@@ -293,13 +293,17 @@ class IsilonAPI:
         self.snapshot_api = self.sdk.SnapshotApi(api_client)
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
+        # Robust mapping for nested PAPI objects
+        lims = getattr(q, "limits", None)
+        usage = getattr(q, "usage", None)
         return QuotaEntry(
             id=q.id, path=q.path,
-            hard_limit_bytes=q.limits.hard or 0,
-            soft_limit_bytes=q.limits.soft or 0,
-            usage_bytes=q.usage.inclusive or 0,
-            users=q.users or [], groups=q.groups or [],
-            access_zone=q.zone or "System",
+            hard_limit_bytes=getattr(lims, "hard", 0) or 0,
+            soft_limit_bytes=getattr(lims, "soft", 0) or 0,
+            usage_bytes=getattr(usage, "inclusive", 0) or 0,
+            users=getattr(q, "users", []) or [],
+            groups=getattr(q, "groups", []) or [],
+            access_zone=getattr(q, "zone", "System") or "System",
             comment=getattr(q, "comment", ""),
         )
 
@@ -390,14 +394,15 @@ class IsilonAPI:
                 "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
                 "size": getattr(s, "size", 0)
             } for s in resp.snapshots]
-            snaps.sort(key=lambda x: x["created_epoch"], reverse=True)
+            snaps.sort(key=lambda x: x["created_epoch"] or 0, reverse=True)
             return snaps
         except Exception: return []
 
-    def get_acl_for_path(self, path: str) -> Dict[str, Any]:
+    def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
+        """Fetch ACL from Namespace API with explicit zone support."""
         try:
             ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
-            resp = self.namespaces_api.get_acl(ifs_path)
+            resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e: return {"error": str(e)}
 
@@ -499,31 +504,37 @@ from typing import List, Dict, Any, Optional, Tuple
 
 
 
-def bytes_to_gb(value: int) -> float:
-    """Convert bytes to GB."""
+def bytes_to_gb(value: Any) -> float:
+    """Convert bytes to GB. Handles None or string inputs."""
     if not value:
         return 0.0
-    return round(value / (1024 ** 3), 2)
+    try:
+        return round(float(value) / (1024 ** 3), 2)
+    except (ValueError, TypeError):
+        return 0.0
 
 
-def bytes_to_tb(value: int) -> float:
+def bytes_to_tb(value: Any) -> float:
     """Convert bytes to TB."""
     if not value:
         return 0.0
-    return round(value / (1024 ** 4), 2)
+    try:
+        return round(float(value) / (1024 ** 4), 2)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def format_size(value: int) -> str:
     """Format byte value as human-readable string."""
     if not value:
         return "0 bytes"
-    if value >= (1024 ** 4):  # TB
+    if value >= (1024 ** 4):
         return f"{bytes_to_tb(value):,.2f} TB"
-    elif value >= (1024 ** 3):  # GB
+    elif value >= (1024 ** 3):
         return f"{bytes_to_gb(value):,.2f} GB"
-    elif value >= (1024 ** 2):  # MB
+    elif value >= (1024 ** 2):
         return f"{round(value / (1024 ** 2), 2):,.2f} MB"
-    elif value >= 1024:  # KB
+    elif value >= 1024:
         return f"{round(value / 1024, 2):,.2f} KB"
     else:
         return f"{value} bytes"
@@ -550,11 +561,11 @@ def color_for_status(status: Status) -> str:
 
 
 def filter_quotas(
-    quotas: List[Any],
+    quotas: List[QuotaEntry],
     share_name: Optional[str] = None,
     access_zone: Optional[str] = None,
-) -> List[Any]:
-    """Filter quotas by name or zone."""
+) -> List[QuotaEntry]:
+    """Filter quotas by name or zone with explicit type support."""
     results = quotas
     if share_name:
         share_lower = share_name.lower()
@@ -564,7 +575,7 @@ def filter_quotas(
     return results
 
 
-def get_top_offenders(quotas: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
+def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]]]:
     """Group quotas by usage thresholds (95, 80, 70)."""
     categories = {"critical": [], "warning": [], "notice": []}
     for quota in quotas:
@@ -926,7 +937,7 @@ def modify_tab():
             if not handle_api_error(e): st.error(f"Error: {e}")
 
     with t2: render_snapshot_viewer(api.get_snapshots_for_path(quota.path))
-    with t3: render_acl_viewer(api.get_acl_for_path(quota.path))
+    with t3: render_acl_viewer(api.get_acl_for_path(quota.path, zone=quota.access_zone))
 
 
 def provision_tab():

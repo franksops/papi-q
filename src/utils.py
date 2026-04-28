@@ -1,34 +1,40 @@
 """Utility functions for SmartQuota Manager."""
 
 from typing import List, Dict, Any, Optional, Tuple
-from src.api import Status
+from src.api import Status, QuotaEntry
 
 
-def bytes_to_gb(value: int) -> float:
-    """Convert bytes to GB."""
+def bytes_to_gb(value: Any) -> float:
+    """Convert bytes to GB. Handles None or string inputs."""
     if not value:
         return 0.0
-    return round(value / (1024 ** 3), 2)
+    try:
+        return round(float(value) / (1024 ** 3), 2)
+    except (ValueError, TypeError):
+        return 0.0
 
 
-def bytes_to_tb(value: int) -> float:
+def bytes_to_tb(value: Any) -> float:
     """Convert bytes to TB."""
     if not value:
         return 0.0
-    return round(value / (1024 ** 4), 2)
+    try:
+        return round(float(value) / (1024 ** 4), 2)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def format_size(value: int) -> str:
     """Format byte value as human-readable string."""
     if not value:
         return "0 bytes"
-    if value >= (1024 ** 4):  # TB
+    if value >= (1024 ** 4):
         return f"{bytes_to_tb(value):,.2f} TB"
-    elif value >= (1024 ** 3):  # GB
+    elif value >= (1024 ** 3):
         return f"{bytes_to_gb(value):,.2f} GB"
-    elif value >= (1024 ** 2):  # MB
+    elif value >= (1024 ** 2):
         return f"{round(value / (1024 ** 2), 2):,.2f} MB"
-    elif value >= 1024:  # KB
+    elif value >= 1024:
         return f"{round(value / 1024, 2):,.2f} KB"
     else:
         return f"{value} bytes"
@@ -55,11 +61,11 @@ def color_for_status(status: Status) -> str:
 
 
 def filter_quotas(
-    quotas: List[Any],
+    quotas: List[QuotaEntry],
     share_name: Optional[str] = None,
     access_zone: Optional[str] = None,
-) -> List[Any]:
-    """Filter quotas by name or zone."""
+) -> List[QuotaEntry]:
+    """Filter quotas by name or zone with explicit type support."""
     results = quotas
     if share_name:
         share_lower = share_name.lower()
@@ -69,7 +75,7 @@ def filter_quotas(
     return results
 
 
-def get_top_offenders(quotas: List[Any]) -> Dict[str, List[Dict[str, Any]]]:
+def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]]]:
     """Group quotas by usage thresholds (95, 80, 70)."""
     categories = {"critical": [], "warning": [], "notice": []}
     for quota in quotas:

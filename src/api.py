@@ -78,7 +78,7 @@ class IsilonAPI:
         try:
             import isi_sdk
             self.sdk = isi_sdk
-            # Dynamically load models based on version
+            # Dynamically load models
             try:
                 from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
                 from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
@@ -96,7 +96,7 @@ class IsilonAPI:
         self.configuration.host = self.cluster_url
         self.configuration.username = username
         self.configuration.password = password
-        self.configuration.verify_ssl = verify_ssl
+        self.configuration.verify_ssl = self.verify_ssl
         
         api_client = self.sdk.ApiClient(self.configuration)
         self.quota_api = self.sdk.QuotaApi(api_client)
@@ -106,13 +106,17 @@ class IsilonAPI:
         self.snapshot_api = self.sdk.SnapshotApi(api_client)
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
+        # Robust mapping for nested PAPI objects
+        lims = getattr(q, "limits", None)
+        usage = getattr(q, "usage", None)
         return QuotaEntry(
             id=q.id, path=q.path,
-            hard_limit_bytes=q.limits.hard or 0,
-            soft_limit_bytes=q.limits.soft or 0,
-            usage_bytes=q.usage.inclusive or 0,
-            users=q.users or [], groups=q.groups or [],
-            access_zone=q.zone or "System",
+            hard_limit_bytes=getattr(lims, "hard", 0) or 0,
+            soft_limit_bytes=getattr(lims, "soft", 0) or 0,
+            usage_bytes=getattr(usage, "inclusive", 0) or 0,
+            users=getattr(q, "users", []) or [],
+            groups=getattr(q, "groups", []) or [],
+            access_zone=getattr(q, "zone", "System") or "System",
             comment=getattr(q, "comment", ""),
         )
 
@@ -203,14 +207,15 @@ class IsilonAPI:
                 "created": datetime.fromtimestamp(s.created).strftime('%Y-%m-%d %H:%M:%S') if s.created else "N/A",
                 "size": getattr(s, "size", 0)
             } for s in resp.snapshots]
-            snaps.sort(key=lambda x: x["created_epoch"], reverse=True)
+            snaps.sort(key=lambda x: x["created_epoch"] or 0, reverse=True)
             return snaps
         except Exception: return []
 
-    def get_acl_for_path(self, path: str) -> Dict[str, Any]:
+    def get_acl_for_path(self, path: str, zone: str = "System") -> Dict[str, Any]:
+        """Fetch ACL from Namespace API with explicit zone support."""
         try:
             ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
-            resp = self.namespaces_api.get_acl(ifs_path)
+            resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e: return {"error": str(e)}
 
