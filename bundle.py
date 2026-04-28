@@ -107,12 +107,18 @@ def bootstrap():
     for mod, pkg in deps_map.items():
         try:
             __import__(mod)
-        except ImportError:
+        except ImportError as e:
             missing.append(pkg)
+            print(f"[*] Import Failure: {mod} ({pkg}) -> {e}")
     
     if missing:
         print(f"\\n[!] Critical: Dependencies missing inside venv ({sys.version.split()[0]})")
-        print(f"[*] Try: {sys.executable} -m pip install " + " ".join(missing))
+        site_pkg = list(Path(sys.prefix).glob("lib/python*/site-packages"))
+        if site_pkg:
+            print(f"[*] Contents of {site_pkg[0]}:")
+            run_command(["ls", "-F", str(site_pkg[0])])
+        
+        print(f"\\n[*] Try: {sys.executable} -m pip install " + " ".join(missing))
         sys.exit(1)
 
     return True
