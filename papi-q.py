@@ -33,68 +33,65 @@ def run_command(cmd, shell=False):
         return False
 
 def bootstrap():
-    """Ensure all system and python dependencies are met using a managed venv."""
+    """Ensure dependencies are met using the best available stable Python version."""
     config_dir = (Path.home() / ".papi-q").resolve()
     venv_dir = config_dir / "venv"
     config_dir.mkdir(parents=True, exist_ok=True)
     
-    # Robust venv detection using resolved paths
     current_prefix = Path(sys.prefix).resolve()
     in_venv = current_prefix == venv_dir.resolve()
-    
-    # DEBUG: Help identify why detection might fail on new Python versions
-    if os.environ.get("DEBUG_PAPI"):
-        print(f"[*] Debug: prefix={current_prefix}")
-        print(f"[*] Debug: venv_dir={venv_dir.resolve()}")
-        print(f"[*] Debug: in_venv={in_venv}")
 
-    deps = {
-        "streamlit": "streamlit",
-        "isi_sdk": "isilon-sdk",
-        "pandas": "pandas",
-        "urllib3": "urllib3",
-        "dotenv": "python-dotenv"
-    }
-    
-    missing_pkg = []
-    for mod, pkg in deps.items():
+    # If we aren't in a venv yet, let's find the best Python to use
+    if not in_venv:
+        best_python = sys.executable
+        # If current is 3.14+, search for stable fallbacks
+        if sys.version_info >= (3, 14):
+            for version in ["3.13", "3.12", "3.11"]:
+                path = shutil.which(f"python{version}")
+                if path:
+                    print(f"[*] Experimental Python detected. Switching to stable: {path}")
+                    best_python = path
+                    break
+        
+        if not venv_dir.exists():
+            print(f"[*] Creating stable virtual environment in {venv_dir}...")
+            if not run_command([best_python, "-m", "venv", str(venv_dir)]):
+                print(f"Error: Failed to create venv with {best_python}")
+                sys.exit(1)
+        
+        venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
+        
+        # Verify if the venv is actually using a stable version
+        # If the venv exists but was built with 3.14, we should recreate it
+        res = subprocess.run([venv_python, "--version"], capture_output=True, text=True)
+        if "3.14" in res.stdout and sys.version_info < (3, 14):
+            print("[!] Existing venv is 3.14. Recreating with stable Python...")
+            shutil.rmtree(venv_dir)
+            return bootstrap() # Recurse once to recreate
+
+        print("[*] Syncing dependencies in virtual environment...")
+        run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+        deps = ["isilon-sdk", "streamlit", "pandas", "urllib3", "python-dotenv"]
+        if not run_command([venv_python, "-m", "pip", "install"] + deps):
+            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + deps)
+
+        print("\n[+] Environment ready. Re-launching...\n")
+        os.execv(venv_python, [venv_python] + sys.argv)
+
+    # If we are in the venv, verify imports
+    deps_map = {"streamlit": "streamlit", "isi_sdk": "isilon-sdk", "pandas": "pandas", "urllib3": "urllib3", "dotenv": "python-dotenv"}
+    missing = []
+    for mod, pkg in deps_map.items():
         try:
             __import__(mod)
-        except (ImportError, Exception) as e:
-            missing_pkg.append(pkg)
-            if in_venv:
-                print(f"[*] Dependency Error: Failed to import {mod} ({pkg}) -> {e}")
-
-    if not missing_pkg:
-        return True
-
-    # If we are in the venv and still missing pkgs, it's a critical failure
-    if in_venv:
-        print(f"\n[!] Critical: Dependencies missing inside virtual environment.")
-        print(f"[!] Missing: {', '.join(missing_pkg)}")
-        print(f"[*] Try manual fix: {sys.executable} -m pip install " + " ".join(missing_pkg))
+        except ImportError:
+            missing.append(pkg)
+    
+    if missing:
+        print(f"\n[!] Critical: Dependencies missing inside venv ({sys.version.split()[0]})")
+        print(f"[*] Try: {sys.executable} -m pip install " + " ".join(missing))
         sys.exit(1)
 
-    print(f"\n[!] Missing Python dependencies: {', '.join(missing_pkg)}")
-    
-    if not venv_dir.exists():
-        print(f"[*] Creating virtual environment in {venv_dir}...")
-        if not run_command([sys.executable, "-m", "venv", str(venv_dir)]):
-            print("Error: Failed to create virtual environment.")
-            sys.exit(1)
-    
-    venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
-    print("[*] Syncing dependencies in virtual environment...")
-    
-    # Ensure pip is up to date first
-    run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-        
-    if not run_command([venv_python, "-m", "pip", "install"] + list(deps.values())):
-        # Fallback for systems with tight constraints
-        run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + list(deps.values()))
-
-    print("\n[+] Environment ready. Re-launching...\n")
-    os.execv(venv_python, [venv_python] + sys.argv)
     return True
 
 if "__main__" == __name__ and not os.environ.get("STREAMLIT_RUNNING"):
