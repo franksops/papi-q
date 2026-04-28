@@ -24,12 +24,15 @@ The script includes an intelligent bootstrapper that handles environment setup:
 ## 🔐 Authentication & Connectivity
 
 ### Login Format
-*   **Active Directory Support**: Supports the `domain\user` format (use a single backslash in the UI).
-*   **Auto-Saving Clusters**: Select from the saved clusters or enter a **Custom URL**. Successful custom logins are automatically added to your inventory for future use.
-*   **Custom URL**: Select "Custom URL..." from the dropdown to manually enter a management IP or FQDN (e.g., `https://10.1.1.50:8080`).
+*   **Flexible Username Support**: Supports `user`, `domain\user`, `user@domain.com`, and `user@sub.domain.com`.
+*   **Auto-Saving Clusters**: Select from the saved clusters or enter an IP/Hostname. Successful logins are added to your inventory.
+*   **Smart URL (Connection Logic)**: You can enter just the management IP or Hostname (e.g., `10.1.1.50`). The application automatically:
+    1.  Adds the `https://` prefix.
+    2.  Appends the mandatory `:8080` OneFS PAPI port.
 
-### Security
-*   **Zero Persistence**: Credentials are held in volatile memory and are never saved to disk.
+### Application Control
+*   **Shutdown**: Securely terminate the Streamlit server from the sidebar. Includes a safety confirmation to prevent accidental closure.
+*   **Security**: Credentials are held in volatile memory and are never saved to disk.
 *   **SSL Verification**: Option to ignore self-signed certificates (common in internal management networks).
 
 ---

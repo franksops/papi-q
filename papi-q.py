@@ -357,8 +357,19 @@ class QuotaEntry:
 class IsilonAPI:
     """Wrapper for Isilon SDK API interactions."""
     
+    @staticmethod
+    def format_url(input_url: str) -> str:
+        """Construct a full OneFS API URL from IP, hostname, or partial URL."""
+        if not input_url: return ""
+        url = input_url.strip().lower()
+        if not url.startswith("http"):
+            url = f"https://{url}"
+        if ":" not in url.split("//")[-1]:
+            url = f"{url}:8080"
+        return url
+
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
-        self.cluster_url = cluster_url.rstrip("/")
+        self.cluster_url = self.format_url(cluster_url)
         try:
             try:
                 import isi_sdk as sdk_module
@@ -727,7 +738,8 @@ def init_session() -> None:
         "admin_user": None,
         "quotas": [],
         "quotas_loaded": False,
-        "selected_quota_paths": []
+        "selected_quota_paths": [],
+        "confirm_shutdown": False
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -867,6 +879,8 @@ import streamlit as st
 from streamlit import session_state as state
 import pandas as pd
 from urllib.parse import urlparse
+import os
+import signal
 
 # Import modular logic
 
@@ -896,17 +910,19 @@ def login_section():
     inv = load_clusters()
     selected = st.sidebar.selectbox("Cluster", options=list(inv.keys()) + ["Custom URL..."], key="selected_cluster_box")
     
-    url = st.sidebar.text_input("URL", placeholder="https://ip:8080") if selected == "Custom URL..." else inv.get(selected, "")
-    user = st.sidebar.text_input("Username", placeholder="domain\\user")
+    url_input = st.sidebar.text_input("IP or Hostname", placeholder="10.1.1.50") if selected == "Custom URL..." else inv.get(selected, "")
+    user = st.sidebar.text_input("Username", placeholder="user, domain\\user, or user@domain")
     pwd = st.sidebar.text_input("Password", type="password")
     skip_ssl = st.sidebar.checkbox("Ignore SSL", value=True)
     
     if st.sidebar.button("Connect", use_container_width=True):
-        if not all([url, user, pwd]):
+        if not all([url_input, user, pwd]):
             st.sidebar.error("Missing fields")
             return
         
         try:
+            # Auto-format URL
+            url = IsilonAPI.format_url(url_input)
             p = urlparse(url)
             host = p.hostname or url.split("//")[-1].split(":")[0] or "unknown_cluster"
             display_name = selected if selected != "Custom URL..." else host.replace(".", "_")
@@ -917,18 +933,36 @@ def login_section():
             
             state.selected_cluster = display_name
             state.admin_user = user
+            log_info(f"User {user} connected to {url}")
             st.rerun()
         except Exception as e:
+            log_error(f"Login failed for {user} at {url_input}", e)
             st.sidebar.error(f"Failed: {e}")
 
 
 def sidebar_tools():
     if not state.api_client: return
     st.sidebar.header(f"📍 {state.selected_cluster}")
-    if st.sidebar.button("🚪 Logout", use_container_width=True):
+    
+    c1, c2 = st.sidebar.columns(2)
+    if c1.button("🚪 Logout", use_container_width=True):
         clear_api_client()
         st.rerun()
     
+    if c2.button("🛑 Shutdown", use_container_width=True, type="primary"):
+        state.confirm_shutdown = True
+
+    if state.get("confirm_shutdown"):
+        st.sidebar.warning("Are you sure?")
+        cc1, cc2 = st.sidebar.columns(2)
+        if cc1.button("Yes", use_container_width=True):
+            log_info("Application shutdown requested via GUI")
+            st.sidebar.success("Shutting down...")
+            os.kill(os.getpid(), signal.SIGINT)
+        if cc2.button("No", use_container_width=True):
+            state.confirm_shutdown = False
+            st.rerun()
+
     with st.sidebar.expander("⚙️ Inventory"):
         inv = load_clusters()
         for n, u in inv.items():

@@ -17,7 +17,8 @@ def init_session() -> None:
         "admin_user": None,
         "quotas": [],
         "quotas_loaded": False,
-        "selected_quota_paths": []
+        "selected_quota_paths": [],
+        "confirm_shutdown": False
     }
     for key, val in defaults.items():
         if key not in st.session_state:

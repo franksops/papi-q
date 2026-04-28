@@ -18,6 +18,7 @@
     - **ACL Inspector**: Detailed view of Owner, Group, and Access Control Entries (ACEs).
 - **Auto-Saving Clusters**: Successful logins via custom URLs are automatically saved to your inventory.
 - **Bulk Export**: Generate human-readable CSV reports for all quotas, filtered by Access Zone or Protocol (SMB/NFS).
+- **Graceful Shutdown**: Securely stop the application server directly from the GUI.
 - **Daily Audit Logging**: Automatic rotation of cluster-specific audit logs named `hostname_MMDDYEAR.csv`.
 - **System-Level Logging**: Comprehensive startup and error logging to `system.log` for easier troubleshooting.
 - **Integrated Docs**: Direct links to **Official Dell Documentation** for every management task.
@@ -44,10 +45,12 @@ curl -L -o papi-q.py https://raw.githubusercontent.com/franksops/papi-q/gemini/p
 
 ## 🔐 Authentication
 
-1. **Cluster Selection**: Choose a saved cluster or select **"Custom URL..."** to enter a manual IP/FQDN. Successful custom logins are automatically added to your inventory.
+1. **Cluster Selection**: Choose a saved cluster or enter a raw **IP or Hostname**.
+    - **Smart URL**: Enter `10.1.1.50` or `cluster01` and the app automatically constructs the full `https://...:8080` path.
+    - **Inventory**: Successful logins are automatically added to your local inventory for one-click access.
 2. **Credentials**: 
-    - Supports local cluster accounts.
-    - Supports Active Directory accounts in **`domain\user`** format.
+    - Supports local cluster accounts and Active Directory.
+    - **Formats**: `user`, `domain\user`, `user@domain.com`, or `user@sub.domain.com`.
 3. **SSL**: Option to ignore SSL certificates for internal management networks.
 
 ---

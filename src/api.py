@@ -73,8 +73,19 @@ class QuotaEntry:
 class IsilonAPI:
     """Wrapper for Isilon SDK API interactions."""
     
+    @staticmethod
+    def format_url(input_url: str) -> str:
+        """Construct a full OneFS API URL from IP, hostname, or partial URL."""
+        if not input_url: return ""
+        url = input_url.strip().lower()
+        if not url.startswith("http"):
+            url = f"https://{url}"
+        if ":" not in url.split("//")[-1]:
+            url = f"{url}:8080"
+        return url
+
     def __init__(self, cluster_url: str, username: str, password: str, verify_ssl: bool = True):
-        self.cluster_url = cluster_url.rstrip("/")
+        self.cluster_url = self.format_url(cluster_url)
         try:
             try:
                 import isi_sdk as sdk_module
