@@ -380,35 +380,43 @@ class IsilonAPI:
                 import isilon_sdk as sdk
             
             self.sdk = sdk
+            self._models = {}
+
+            # --- DEEP DISCOVERY ---
+            # We search for quota_entry.py and derive the model package from its location
+            import os
+            import importlib
             
-            # Attempt to find models with various fallback paths
-            try:
-                # OneFS 9.12+ specific path
-                from isi_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
-                from isi_sdk.v9_12_0.models.quota_limits import QuotaLimits
-                from isi_sdk.v9_12_0.models.quota_quota import QuotaQuota
-                self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
-            except ImportError:
-                try:
-                    # OneFS 9.12+ with isilon_sdk name
-                    from isilon_sdk.v9_12_0.models.quota_entry import QuotaEntry as SDKQuotaEntry
-                    from isilon_sdk.v9_12_0.models.quota_limits import QuotaLimits
-                    from isilon_sdk.v9_12_0.models.quota_quota import QuotaQuota
-                    self._models = {"entry": SDKQuotaEntry, "limits": QuotaLimits, "quota": QuotaQuota}
-                except ImportError:
-                    # Generic fallback (older SDK versions)
-                    import importlib
-                    pkg_name = sdk.__name__
-                    m_entry = importlib.import_module(f"{pkg_name}.models.quota_entry")
-                    m_limits = importlib.import_module(f"{pkg_name}.models.quota_limits")
-                    m_quota = importlib.import_module(f"{pkg_name}.models.quota_quota")
-                    
-                    self._models = {
-                        "entry": getattr(m_entry, "QuotaEntry"),
-                        "limits": getattr(m_limits, "QuotaLimits"),
-                        "quota": getattr(m_quota, "QuotaQuota")
-                    }
+            search_base = os.path.dirname(sdk.__file__)
+            target_file = "quota_entry.py"
+            model_pkg_path = None
+
+            for root, dirs, files in os.walk(search_base):
+                if target_file in files:
+                    # Found it! Now convert filesystem path to python module path
+                    # e.g. .../isilon_sdk/v9_12_0/models -> isilon_sdk.v9_12_0.models
+                    rel_path = os.path.relpath(root, os.path.dirname(search_base))
+                    model_pkg_path = rel_path.replace(os.sep, ".")
+                    break
+            
+            if not model_pkg_path:
+                raise ImportError(f"Could not locate {target_file} inside {sdk.__name__}")
+
+            # Dynamically import the discovered models
+            m_entry = importlib.import_module(f"{model_pkg_path}.quota_entry")
+            m_limits = importlib.import_module(f"{model_pkg_path}.quota_limits")
+            m_quota = importlib.import_module(f"{model_pkg_path}.quota_quota")
+            
+            self._models = {
+                "entry": getattr(m_entry, "QuotaEntry"),
+                "limits": getattr(m_limits, "QuotaLimits"),
+                "quota": getattr(m_quota, "QuotaQuota")
+            }
+            
+            log_info(f"SDK Discovery Successful: using models from {model_pkg_path}")
+
         except Exception as e:
+            log_error("SDK Model Discovery Failed", e)
             raise ImportError(f"SDK Error: {e}")
         
         self.configuration = self.sdk.Configuration()
