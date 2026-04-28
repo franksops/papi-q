@@ -307,18 +307,36 @@ class IsilonAPI:
         return all_q
 
     def get_access_zones_info(self) -> Dict[str, str]:
-        """Returns a mapping of Zone Name -> Base Path."""
-        if not self.namespaces_api: return {"System": "/ifs"}
-        try:
-            resp = self.namespaces_api.get_access_zones()
-            # Some versions might return 'System' with path '/' instead of '/ifs'
-            data = {}
-            for z in resp.access_zones:
-                path = z.path
-                if z.name == "System" and path == "/": path = "/ifs"
-                data[z.name] = path
-            return data
-        except Exception: return {"System": "/ifs"}
+        """Returns a mapping of Zone Name -> Base Path. Tries multiple API paths for discovery."""
+        data = {"System": "/ifs"}
+        
+        # 1. Try Namespaces API
+        if self.namespaces_api:
+            try:
+                resp = self.namespaces_api.get_access_zones()
+                if hasattr(resp, "access_zones"):
+                    for z in resp.access_zones:
+                        path = getattr(z, "path", "")
+                        if z.name == "System" and (not path or path == "/"): path = "/ifs"
+                        if z.name and path: data[z.name] = path
+            except Exception as e:
+                log_warning(f"Namespaces zone discovery failed: {e}")
+
+        # 2. Try Protocols API (often has access to zone list via a different path)
+        if len(data) <= 1 and self.protocols_api:
+            try:
+                # Some SDK versions have list_access_zones here
+                method = getattr(self.protocols_api, "list_access_zones", None)
+                if method:
+                    resp = method()
+                    for z in getattr(resp, "zones", []):
+                        path = getattr(z, "path", "")
+                        if z.name == "System" and (not path or path == "/"): path = "/ifs"
+                        if z.name and path: data[z.name] = path
+            except Exception as e:
+                log_warning(f"Protocols zone discovery failed: {e}")
+
+        return data
 
     def list_access_zones(self) -> List[str]:
         return list(self.get_access_zones_info().keys())

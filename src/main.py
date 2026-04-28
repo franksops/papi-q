@@ -73,6 +73,10 @@ def sidebar_tools():
     if not state.api_client: return
     st.sidebar.header(f"📍 {state.selected_cluster}")
     
+    if st.sidebar.button("🔄 Force Refresh Inventory", use_container_width=True):
+        state.quotas_loaded = False
+        st.rerun()
+
     if st.sidebar.button("🚪 Logout", use_container_width=True):
         clear_api_client()
         st.rerun()
