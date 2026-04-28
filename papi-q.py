@@ -34,13 +34,20 @@ def run_command(cmd, shell=False):
 
 def bootstrap():
     """Ensure all system and python dependencies are met using a managed venv."""
-    config_dir = Path.home() / ".papi-q"
+    config_dir = (Path.home() / ".papi-q").resolve()
     venv_dir = config_dir / "venv"
     config_dir.mkdir(parents=True, exist_ok=True)
     
-    # Check if we are already running in our managed venv
-    in_venv = sys.prefix == str(venv_dir)
+    # Robust venv detection using resolved paths
+    current_prefix = Path(sys.prefix).resolve()
+    in_venv = current_prefix == venv_dir.resolve()
     
+    # DEBUG: Help identify why detection might fail on new Python versions
+    if os.environ.get("DEBUG_PAPI"):
+        print(f"[*] Debug: prefix={current_prefix}")
+        print(f"[*] Debug: venv_dir={venv_dir.resolve()}")
+        print(f"[*] Debug: in_venv={in_venv}")
+
     deps = {
         "streamlit": "streamlit",
         "isi_sdk": "isilon-sdk",
@@ -53,7 +60,7 @@ def bootstrap():
     for mod, pkg in deps.items():
         try:
             __import__(mod)
-        except ImportError as e:
+        except (ImportError, Exception) as e:
             missing_pkg.append(pkg)
             if in_venv:
                 print(f"[*] Dependency Error: Failed to import {mod} ({pkg}) -> {e}")
@@ -61,31 +68,33 @@ def bootstrap():
     if not missing_pkg:
         return True
 
-    print(f"\n[!] Missing Python dependencies: {', '.join(missing_pkg)}")
-    
-    # If not in venv, try to create/use it
-    if not in_venv:
-        if not venv_dir.exists():
-            print(f"[*] Creating virtual environment in {venv_dir}...")
-            if not run_command([sys.executable, "-m", "venv", str(venv_dir)]):
-                print("Error: Failed to create virtual environment.")
-                sys.exit(1)
-        
-        venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
-        print("[*] Installing dependencies into virtual environment...")
-        run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
-            
-        if not run_command([venv_python, "-m", "pip", "install"] + missing_pkg):
-            # Fallback for some systems
-            run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + missing_pkg)
-
-        print("\n[+] Environment ready. Re-launching...\n")
-        os.execv(venv_python, [venv_python] + sys.argv)
-    else:
+    # If we are in the venv and still missing pkgs, it's a critical failure
+    if in_venv:
         print(f"\n[!] Critical: Dependencies missing inside virtual environment.")
-        print(f"Try manual fix: {sys.executable} -m pip install " + " ".join(missing_pkg))
+        print(f"[!] Missing: {', '.join(missing_pkg)}")
+        print(f"[*] Try manual fix: {sys.executable} -m pip install " + " ".join(missing_pkg))
         sys.exit(1)
 
+    print(f"\n[!] Missing Python dependencies: {', '.join(missing_pkg)}")
+    
+    if not venv_dir.exists():
+        print(f"[*] Creating virtual environment in {venv_dir}...")
+        if not run_command([sys.executable, "-m", "venv", str(venv_dir)]):
+            print("Error: Failed to create virtual environment.")
+            sys.exit(1)
+    
+    venv_python = str(venv_dir / "bin" / "python") if os.name != "nt" else str(venv_dir / "Scripts" / "python.exe")
+    print("[*] Syncing dependencies in virtual environment...")
+    
+    # Ensure pip is up to date first
+    run_command([venv_python, "-m", "pip", "install", "--upgrade", "pip"])
+        
+    if not run_command([venv_python, "-m", "pip", "install"] + list(deps.values())):
+        # Fallback for systems with tight constraints
+        run_command([venv_python, "-m", "pip", "install", "--break-system-packages"] + list(deps.values()))
+
+    print("\n[+] Environment ready. Re-launching...\n")
+    os.execv(venv_python, [venv_python] + sys.argv)
     return True
 
 if "__main__" == __name__ and not os.environ.get("STREAMLIT_RUNNING"):
