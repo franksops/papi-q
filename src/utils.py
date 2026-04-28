@@ -40,24 +40,29 @@ def format_size(value: int) -> str:
         return f"{value} bytes"
 
 
-def status_badge(status: Status) -> str:
-    """Get status emoji for UI display."""
+def status_badge(status: Any) -> str:
+    """Get status emoji for UI display. Resilient to both Enum and string inputs."""
+    # Extract value if it's an Enum member
+    val = status.value if hasattr(status, "value") else str(status).lower()
+    
     mapping = {
-        Status.HEALTHY: "🟢",
-        Status.WARNING: "🟡",
-        Status.CRITICAL: "🔴",
+        "healthy": "🟢",
+        "warning": "🟡",
+        "critical": "🔴",
     }
-    return mapping.get(status, "⚪")
+    return mapping.get(val, "⚪")
 
 
-def color_for_status(status: Status) -> str:
-    """Get hex color for status display."""
+def color_for_status(status: Any) -> str:
+    """Get hex color for status display. Resilient to both Enum and string inputs."""
+    val = status.value if hasattr(status, "value") else str(status).lower()
+    
     mapping = {
-        Status.HEALTHY: "#006837",
-        Status.WARNING: "#F58513",
-        Status.CRITICAL: "#D72638",
+        "healthy": "#006837",
+        "warning": "#F58513",
+        "critical": "#D72638",
     }
-    return mapping.get(status, "#666666")
+    return mapping.get(val, "#666666")
 
 
 def filter_quotas(

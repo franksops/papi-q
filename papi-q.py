@@ -482,12 +482,21 @@ class IsilonAPI:
     def _map_quota_response(self, q: Any) -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
         lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
-        usage = getattr(q, "usage", None)
+        usage_obj = getattr(q, "usage", None)
+        
+        # Determine usage: try fslogical first (often most accurate for users), then logical, then physical
+        usage_val = 0
+        if usage_obj:
+            # Check for various PAPI usage fields
+            usage_val = (getattr(usage_obj, "fslogical", 0) or 
+                         getattr(usage_obj, "logical", 0) or 
+                         getattr(usage_obj, "physical", 0) or 0)
+                         
         return QuotaEntry(
             id=q.id, path=q.path,
             hard_limit_bytes=getattr(lims, "hard", 0) or 0,
             soft_limit_bytes=getattr(lims, "soft", 0) or 0,
-            usage_bytes=getattr(usage, "logical", 0) or getattr(usage, "inclusive", 0) or 0,
+            usage_bytes=usage_val,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
             access_zone=getattr(q, "zone", "System") or "System",
@@ -508,7 +517,7 @@ class IsilonAPI:
                         if method:
                             smb = method(zone=zone)
                             for s in smb.shares:
-                                mapping[s.path] = "SMB"
+                                mapping[s.path.rstrip("/")] = "SMB"
                     except Exception as e:
                         log_warning(f"SMB mapping failed for zone {zone}: {e}")
                 
@@ -520,8 +529,9 @@ class IsilonAPI:
                             nfs = method(zone=zone)
                             for e in nfs.exports:
                                 for p in e.paths:
-                                    current = mapping.get(p, "")
-                                    mapping[p] = "SMB, NFS" if current == "SMB" else "NFS"
+                                    normalized_p = p.rstrip("/")
+                                    current = mapping.get(normalized_p, "")
+                                    mapping[normalized_p] = "SMB, NFS" if current == "SMB" else "NFS"
                     except Exception as e:
                         log_warning(f"NFS mapping failed for zone {zone}: {e}")
         except Exception as e:
@@ -553,13 +563,26 @@ class IsilonAPI:
         # Enrich quotas with Zone info based on path
         zones_info = self.get_access_zones_info()
         # Sort zones by path length descending to match most specific path first
-        sorted_zones = sorted(zones_info.items(), key=lambda x: len(x[1]), reverse=True)
+        # We ensure all zone paths are normalized for comparison
+        sorted_zones = []
+        for name, p in zones_info.items():
+            norm_p = p.rstrip("/")
+            if not norm_p.startswith("/ifs"): norm_p = f"/ifs/{norm_p.lstrip('/')}"
+            sorted_zones.append((name, norm_p))
+        
+        sorted_zones.sort(key=lambda x: len(x[1]), reverse=True)
         
         for q in all_q:
+            # Normalize quota path for matching
+            q_path = q.path.rstrip("/")
+            if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
+            
             # Only override if it's currently 'System' or the API didn't provide it
             if q.access_zone == "System":
                 for zone_name, zone_path in sorted_zones:
-                    if q.path.startswith(zone_path):
+                    # Match if quota path starts with zone path
+                    # Add trailing slash check to avoid partial folder matches (e.g. /ifs/data vs /ifs/data2)
+                    if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
                         q.access_zone = zone_name
                         break
         
@@ -574,7 +597,13 @@ class IsilonAPI:
         if not self.namespaces_api: return {"System": "/ifs"}
         try:
             resp = self.namespaces_api.get_access_zones()
-            return {z.name: z.path for z in resp.access_zones}
+            # Some versions might return 'System' with path '/' instead of '/ifs'
+            data = {}
+            for z in resp.access_zones:
+                path = z.path
+                if z.name == "System" and path == "/": path = "/ifs"
+                data[z.name] = path
+            return data
         except Exception: return {"System": "/ifs"}
 
     def list_access_zones(self) -> List[str]:
@@ -708,24 +737,29 @@ def format_size(value: int) -> str:
         return f"{value} bytes"
 
 
-def status_badge(status: Status) -> str:
-    """Get status emoji for UI display."""
+def status_badge(status: Any) -> str:
+    """Get status emoji for UI display. Resilient to both Enum and string inputs."""
+    # Extract value if it's an Enum member
+    val = status.value if hasattr(status, "value") else str(status).lower()
+    
     mapping = {
-        Status.HEALTHY: "🟢",
-        Status.WARNING: "🟡",
-        Status.CRITICAL: "🔴",
+        "healthy": "🟢",
+        "warning": "🟡",
+        "critical": "🔴",
     }
-    return mapping.get(status, "⚪")
+    return mapping.get(val, "⚪")
 
 
-def color_for_status(status: Status) -> str:
-    """Get hex color for status display."""
+def color_for_status(status: Any) -> str:
+    """Get hex color for status display. Resilient to both Enum and string inputs."""
+    val = status.value if hasattr(status, "value") else str(status).lower()
+    
     mapping = {
-        Status.HEALTHY: "#006837",
-        Status.WARNING: "#F58513",
-        Status.CRITICAL: "#D72638",
+        "healthy": "#006837",
+        "warning": "#F58513",
+        "critical": "#D72638",
     }
-    return mapping.get(status, "#666666")
+    return mapping.get(val, "#666666")
 
 
 def filter_quotas(
