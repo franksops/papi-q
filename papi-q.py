@@ -291,6 +291,7 @@ import importlib
 import pkgutil
 import os
 import re
+import sys
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -393,21 +394,41 @@ class IsilonAPI:
         try:
             # 1. Resolve base SDK package
             try:
-                import isi_sdk as sdk
+                import isi_sdk as sdk_base
             except ImportError:
-                import isilon_sdk as sdk
+                import isilon_sdk as sdk_base
             
+            # 2. Check for versioned subpackages (typical in 0.7.0+)
+            sdk = sdk_base
+            for loader, mod_name, is_pkg in pkgutil.iter_modules(sdk_base.__path__, sdk_base.__name__ + '.'):
+                if 'v9_' in mod_name or 'v8_' in mod_name:
+                    try:
+                        sdk = importlib.import_module(mod_name)
+                        log_info(f"Using versioned SDK subpackage: {mod_name}")
+                        break
+                    except: continue
+
             self.sdk = sdk
             self._models = {}
             
-            # 2. Universal Component Discovery
+            # 3. Universal Component Discovery
+            # We search for classes in the current sdk module and its models/api subpackages
             def find_component(name_patterns: List[str]):
                 """Search package submodules for a class matching patterns."""
-                # Check top-level first
+                # Check current sdk module first
                 for p in name_patterns:
                     if hasattr(sdk, p): return getattr(sdk, p)
                 
-                # Walk subpackages
+                # Search common subpackage locations
+                subpkgs = ['models', 'api', 'rest']
+                for sub in subpkgs:
+                    try:
+                        m = importlib.import_module(f"{sdk.__name__}.{sub}")
+                        for p in name_patterns:
+                            if hasattr(m, p): return getattr(m, p)
+                    except: continue
+                
+                # Last resort: Deep walk (only if not found yet)
                 for loader, mod_name, is_pkg in pkgutil.walk_packages(sdk.__path__, sdk.__name__ + '.'):
                     if 'models' in mod_name or 'api' in mod_name:
                         try:
@@ -417,14 +438,14 @@ class IsilonAPI:
                         except: continue
                 return None
 
-            # Find Models
-            self._models["entry"] = find_component(["QuotaEntry", "QuotaQuotaEntry"])
-            self._models["limits"] = find_component(["QuotaLimits"])
-            self._models["quota"] = find_component(["QuotaQuota", "QuotaQuotaCreateParams"])
+            # Find Models (Expanded patterns for 0.7.0 and older versions)
+            self._models["entry"] = find_component(["QuotaQuota", "QuotaEntry", "QuotaQuotaEntry"])
+            self._models["limits"] = find_component(["QuotaQuotaThresholds", "QuotaThresholds", "QuotaLimits"])
+            self._models["quota"] = find_component(["QuotaQuotaCreateParams", "QuotaQuota", "QuotaQuotaCreate"])
             
             if not all(self._models.values()):
                 missing = [k for k, v in self._models.items() if not v]
-                raise ImportError(f"Missing SDK Models: {missing}")
+                raise ImportError(f"Missing SDK Models: {missing}. Checked in {sdk.__name__}")
 
             # Find APIs & Config
             ConfigClass = find_component(["Configuration"])
@@ -436,7 +457,7 @@ class IsilonAPI:
             SnapshotApiClass = find_component(["SnapshotApi"])
 
             if not all([ConfigClass, ApiClientClass, QuotaApiClass]):
-                raise ImportError("Could not locate core SDK API classes")
+                raise ImportError(f"Could not locate core SDK API classes in {sdk.__name__}")
 
             # Initialize
             self.configuration = ConfigClass()
@@ -459,14 +480,14 @@ class IsilonAPI:
             raise ImportError(f"SDK Error: {e}")
 
     def _map_quota_response(self, q: Any) -> QuotaEntry:
-        # Robust mapping for nested PAPI objects
-        lims = getattr(q, "limits", None)
+        # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
+        lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
         usage = getattr(q, "usage", None)
         return QuotaEntry(
             id=q.id, path=q.path,
             hard_limit_bytes=getattr(lims, "hard", 0) or 0,
             soft_limit_bytes=getattr(lims, "soft", 0) or 0,
-            usage_bytes=getattr(usage, "inclusive", 0) or 0,
+            usage_bytes=getattr(usage, "logical", 0) or getattr(usage, "inclusive", 0) or 0,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
             access_zone=getattr(q, "zone", "System") or "System",
@@ -491,7 +512,10 @@ class IsilonAPI:
             if path: params["path"] = path
             if access_zone: params["zones"] = access_zone
             if token: params["continue"] = token
-            resp = self.quota_api.list_quotas(**params)
+            
+            # 0.7.0 uses list_quota_quotas, older uses list_quotas
+            method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
+            resp = method(**params)
             return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
@@ -507,7 +531,9 @@ class IsilonAPI:
     def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
         """Fetch raw quota dictionary for the Dynamic Grid."""
         try:
-            resp = self.quota_api.get_quota_entry(quota_id)
+            # 0.7.0 uses get_quota_quota, older uses get_quota_entry
+            method = getattr(self.quota_api, "get_quota_quota", None) or getattr(self.quota_api, "get_quota_entry")
+            resp = method(quota_id)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e:
             raise RuntimeError(f"Fetch failed: {e}")
@@ -516,14 +542,18 @@ class IsilonAPI:
         try:
             update_obj = self._models["entry"]()
             for k, v in payload.items():
-                if k == "limits" and isinstance(v, dict):
+                # Handle thresholds vs limits
+                if (k == "limits" or k == "thresholds") and isinstance(v, dict):
                     lims = self._models["limits"]()
                     for lk, lv in v.items():
                         if hasattr(lims, lk): setattr(lims, lk, int(float(lv)))
                     setattr(update_obj, k, lims)
                 elif hasattr(update_obj, k):
                     setattr(update_obj, k, v)
-            resp = self.quota_api.update_quota_entry(quota_id, update_obj)
+            
+            # 0.7.0 uses update_quota_quota, older uses update_quota_entry
+            method = getattr(self.quota_api, "update_quota_quota", None) or getattr(self.quota_api, "update_quota_entry")
+            resp = method(quota_id, update_obj)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e:
             raise RuntimeError(f"Update Failed: {e}")
@@ -536,18 +566,30 @@ class IsilonAPI:
             if limits.get("soft"): q_limits.soft = int(round(limits["soft"] * (1024**3)))
             if limits.get("advisory"): q_limits.advisory = int(round(limits["advisory"] * (1024**3)))
             
-            q_body = self._models["quota"](
-                path=path, type=q_type, limits=q_limits, 
-                enforced=enforced, include_snapshots=snapshots, zone=access_zone
-            )
-            resp = self.quota_api.create_quota(q_body)
+            # 0.7.0 uses 'thresholds', older uses 'limits'
+            params = {
+                "path": path, "type": q_type, 
+                "enforced": enforced, "include_snapshots": snapshots, "zone": access_zone
+            }
+            if hasattr(self._models["quota"](), "thresholds"):
+                params["thresholds"] = q_limits
+            else:
+                params["limits"] = q_limits
+                
+            q_body = self._models["quota"](**params)
+            
+            # 0.7.0 uses create_quota_quota, older uses create_quota
+            method = getattr(self.quota_api, "create_quota_quota", None) or getattr(self.quota_api, "create_quota")
+            resp = method(q_body)
             return resp.id
         except Exception as e:
             raise RuntimeError(f"Create Failed: {e}")
 
     def delete_quota(self, quota_id: str) -> bool:
         try:
-            self.quota_api.delete_quota_entry(quota_id)
+            # 0.7.0 uses delete_quota_quota, older uses delete_quota_entry
+            method = getattr(self.quota_api, "delete_quota_quota", None) or getattr(self.quota_api, "delete_quota_entry")
+            method(quota_id)
             return True
         except Exception as e:
             raise RuntimeError(f"Delete Failed: {e}")
