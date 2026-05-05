@@ -584,10 +584,10 @@ class IsilonAPI:
             comment=getattr(q, "comment", ""),
         )
 
-    def get_all_paths(self) -> List[Dict[str, Any]]:
+    def get_all_paths(self) -> Dict[str, Dict[str, Any]]:
         """
         Get ALL filesystem paths from SMB shares and NFS exports across ALL zones.
-        Returns a list of dicts with path, protocol, zone, and quota info.
+        Returns a dict mapping path -> {protocol, zone, quota_info}.
         """
         all_paths = {}  # path -> {protocol, zone, quota_info}
         
@@ -735,17 +735,16 @@ class IsilonAPI:
             all_q.extend(zone_quotas)
 
         # Final pass: ensure all quotas have correct zone assignment using path matching
-        inferred_zones = {}  # Track zones inferred from paths
+        inferred_count = 0
         for q in all_q:
             if q.access_zone == "System":
-                # Try path-based assignment
                 q_zone = _match_path_to_zone(q.path, zones_info)
                 if q_zone != "System":
                     q.access_zone = q_zone
-                    inferred_zones[q.id] = q_zone
+                    inferred_count += 1
         
-        if inferred_zones:
-            log_info(f"Inferred {len(inferred_zones)} zones from paths: {set(inferred_zones.values())}")
+        if inferred_count:
+            log_info(f"Inferred {inferred_count} zones from paths via path matching")
         
         # Also check if any quota has zone info that we can use to infer zone paths
         # This helps if zones were discovered but paths were wrong
@@ -876,11 +875,12 @@ class IsilonAPI:
                             parts = q_path.strip("/").split("/")
                             if len(parts) >= 2 and parts[0] == "ifs":
                                 potential_zone = parts[1]
-                                # Only add if it looks like a zone name (not 'data', 'shared', etc.)
-                                if potential_zone not in ["data", "shared", "home", "ifs"]:
+                                # Only add if it's not a common directory name
+                                # Being conservative - only exclude very common ones
+                                if potential_zone not in ["ifs", "data"]:
                                     path_zones.add(potential_zone)
                     
-                    # Merge discovered zones
+                    # Merge discovered zones (only add if not already in data)
                     all_discovered = zone_names | path_zones
                     for z in all_discovered:
                         if z and z != "System":
@@ -1310,7 +1310,7 @@ def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dic
         val = obj[key]
         
         # Non-editable metadata
-        if key in ["id", "usage", "persona", "path", "zone"]:
+        if key in ["id", "usage", "persona", "path", "zone", "access_zone", "type"]:
             st.text(f"{key}: {val}")
             continue
             
@@ -1674,6 +1674,8 @@ def monitoring_tab():
                                             key=f"sel_{key_suffix}")
                 if selected:
                     state.selected_quota_paths = selected
+            elif items:
+                st.caption("💡 No quotas on this page. Select a path with ✅ to manage.")
         else:
             st.info("No items on this page.")
 

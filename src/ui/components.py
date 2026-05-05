@@ -21,7 +21,7 @@ def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dic
         val = obj[key]
         
         # Non-editable metadata
-        if key in ["id", "usage", "persona", "path", "zone"]:
+        if key in ["id", "usage", "persona", "path", "zone", "access_zone", "type"]:
             st.text(f"{key}: {val}")
             continue
             

@@ -283,6 +283,8 @@ def monitoring_tab():
                                             key=f"sel_{key_suffix}")
                 if selected:
                     state.selected_quota_paths = selected
+            elif items:
+                st.caption("💡 No quotas on this page. Select a path with ✅ to manage.")
         else:
             st.info("No items on this page.")
 
