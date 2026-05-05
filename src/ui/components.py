@@ -24,26 +24,27 @@ def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dic
         if key in ["id", "usage", "persona", "path", "zone", "access_zone", "type"]:
             st.text(f"{key}: {val}")
             continue
+        
+        # Handle None values
+        if val is None:
+            st.text(f"{key}: (null)")
+            continue
             
         if isinstance(val, bool):
-            new_val = st.checkbox(f"{key}", value=val, key=f"{key_prefix}_{key}")
+            new_val = st.checkbox(key, value=val, key=f"{key_prefix}_{key}")
             if new_val != val:
                 modified_payload[key] = new_val
         elif isinstance(val, (int, float)):
-            # Special handling for limit fields to show GB hint
-            label = f"{key}"
             if "limit" in key.lower() or key in ["hard", "soft", "advisory"]:
                 st.info(f"💡 {key} = {bytes_to_gb(val):,.2f} GB")
-            
-            new_val = st.number_input(label, value=val, key=f"{key_prefix}_{key}")
+            new_val = st.number_input(key, value=val, key=f"{key_prefix}_{key}")
             if new_val != val:
                 modified_payload[key] = new_val
         elif isinstance(val, str):
-            new_val = st.text_input(f"{key}", value=val, key=f"{key_prefix}_{key}")
+            new_val = st.text_input(key, value=val, key=f"{key_prefix}_{key}")
             if new_val != val:
                 modified_payload[key] = new_val
         elif isinstance(val, dict):
-            # Special handling for 'limits' dict
             if key == "limits":
                 with st.expander("📁 Limits Configuration", expanded=True):
                     nested_mods = render_dynamic_grid(val, key_prefix=f"{key_prefix}_{key}")
