@@ -73,6 +73,12 @@ def sidebar_tools():
     if not state.api_client: return
     st.sidebar.header(f"📍 {state.selected_cluster}")
     
+    # Safety lock - must be checked to apply any changes or deletions
+    st.sidebar.divider()
+    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, key="safety_lock", help="Must be checked to apply any changes or deletions.")
+    if not safety_lock:
+        st.sidebar.info("🔒 Actions are currently locked.")
+    
     if st.sidebar.button("🔄 Force Refresh Inventory", use_container_width=True):
         state.quotas_loaded = False
         st.rerun()
@@ -298,7 +304,7 @@ def monitoring_tab():
                 zone_capacity = sum(p["quota"].hard_limit_bytes for p in quotas_in_zone if p["quota"] and p["quota"].hard_limit_bytes > 0)
                 
                 if zone_capacity > 0:
-                    overall_pct = (zone_usage / zone_capacity) * 100 if zone_capacity > 0 else 0
+                    overall_pct = (zone_usage / zone_capacity) * 100
                     header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas, {overall_pct:.1f}% used)"
                 else:
                     header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas)"
@@ -331,11 +337,10 @@ def modify_tab():
     api = state.api_client
     st.subheader(f"📁 {quota.path}")
     
-    # PRODUCTION SAFETY LOCK
-    st.sidebar.divider()
-    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, key="safety_lock", help="Must be checked to apply any changes or deletions.")
+    # Safety lock is in sidebar_tools - read from session state
+    safety_lock = state.get("safety_lock", False)
     if not safety_lock:
-        st.sidebar.info("🔒 Actions are currently locked.")
+        st.sidebar.warning("🔒 Enable safety lock in sidebar to make changes.")
 
     t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
     
@@ -400,7 +405,7 @@ def provision_tab():
     st.header("Provision Quota ➕")
     api = state.api_client
     
-    safety_lock = st.session_state.get("safety_lock", False) # Fallback check if sidebar not rendered yet
+    safety_lock = state.get("safety_lock", False)
     
     with st.form("p_form"):
         path = st.text_input("Path", placeholder="/ifs/data/...")

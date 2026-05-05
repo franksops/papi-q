@@ -43,18 +43,6 @@ def status_badge(status: Any) -> str:
     return mapping.get(val, "⚪")
 
 
-def color_for_status(status: Any) -> str:
-    """Get hex color for status display. Resilient to both Enum and string inputs."""
-    val = status.value if hasattr(status, "value") else str(status).lower()
-    
-    mapping = {
-        "healthy": "#006837",
-        "warning": "#F58513",
-        "critical": "#D72638",
-    }
-    return mapping.get(val, "#666666")
-
-
 def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]]]:
     """Group quotas by usage thresholds (95, 80, 70)."""
     categories = {"critical": [], "warning": [], "notice": []}

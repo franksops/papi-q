@@ -67,9 +67,9 @@ def render_snapshot_viewer(snapshots: List[Dict[str, Any]]):
         return
         
     df = pd.DataFrame(snapshots)
-    # Use formatted sizes for display
+    # Replace raw bytes with human-readable format
     if "size" in df.columns:
-        df["size_readable"] = df["size"].apply(format_size)
+        df["size"] = df["size"].apply(format_size)
         
     st.dataframe(df, use_container_width=True, hide_index=True)
 

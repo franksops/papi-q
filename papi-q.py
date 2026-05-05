@@ -644,11 +644,6 @@ class IsilonAPI:
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
 
-    def get_protocol_mapping(self) -> Dict[str, str]:
-        """Legacy function - returns path -> protocol mapping."""
-        all_paths = self.get_all_paths()
-        return {path: info["protocol"] for path, info in all_paths.items()}
-
     def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
@@ -1177,18 +1172,6 @@ def status_badge(status: Any) -> str:
     return mapping.get(val, "⚪")
 
 
-def color_for_status(status: Any) -> str:
-    """Get hex color for status display. Resilient to both Enum and string inputs."""
-    val = status.value if hasattr(status, "value") else str(status).lower()
-    
-    mapping = {
-        "healthy": "#006837",
-        "warning": "#F58513",
-        "critical": "#D72638",
-    }
-    return mapping.get(val, "#666666")
-
-
 def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]]]:
     """Group quotas by usage thresholds (95, 80, 70)."""
     categories = {"critical": [], "warning": [], "notice": []}
@@ -1333,9 +1316,9 @@ def render_snapshot_viewer(snapshots: List[Dict[str, Any]]):
         return
         
     df = pd.DataFrame(snapshots)
-    # Use formatted sizes for display
+    # Replace raw bytes with human-readable format
     if "size" in df.columns:
-        df["size_readable"] = df["size"].apply(format_size)
+        df["size"] = df["size"].apply(format_size)
         
     st.dataframe(df, use_container_width=True, hide_index=True)
 
@@ -1441,6 +1424,12 @@ def login_section():
 def sidebar_tools():
     if not state.api_client: return
     st.sidebar.header(f"📍 {state.selected_cluster}")
+    
+    # Safety lock - must be checked to apply any changes or deletions
+    st.sidebar.divider()
+    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, key="safety_lock", help="Must be checked to apply any changes or deletions.")
+    if not safety_lock:
+        st.sidebar.info("🔒 Actions are currently locked.")
     
     if st.sidebar.button("🔄 Force Refresh Inventory", use_container_width=True):
         state.quotas_loaded = False
@@ -1667,7 +1656,7 @@ def monitoring_tab():
                 zone_capacity = sum(p["quota"].hard_limit_bytes for p in quotas_in_zone if p["quota"] and p["quota"].hard_limit_bytes > 0)
                 
                 if zone_capacity > 0:
-                    overall_pct = (zone_usage / zone_capacity) * 100 if zone_capacity > 0 else 0
+                    overall_pct = (zone_usage / zone_capacity) * 100
                     header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas, {overall_pct:.1f}% used)"
                 else:
                     header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas)"
@@ -1700,11 +1689,10 @@ def modify_tab():
     api = state.api_client
     st.subheader(f"📁 {quota.path}")
     
-    # PRODUCTION SAFETY LOCK
-    st.sidebar.divider()
-    safety_lock = st.sidebar.checkbox("🔓 UNLOCK PRODUCTION ACTIONS", value=False, key="safety_lock", help="Must be checked to apply any changes or deletions.")
+    # Safety lock is in sidebar_tools - read from session state
+    safety_lock = state.get("safety_lock", False)
     if not safety_lock:
-        st.sidebar.info("🔒 Actions are currently locked.")
+        st.sidebar.warning("🔒 Enable safety lock in sidebar to make changes.")
 
     t1, t2, t3 = st.tabs(["⚙️ Quota Settings", "📸 Snapshots", "🔒 Permissions"])
     
@@ -1769,7 +1757,7 @@ def provision_tab():
     st.header("Provision Quota ➕")
     api = state.api_client
     
-    safety_lock = st.session_state.get("safety_lock", False) # Fallback check if sidebar not rendered yet
+    safety_lock = state.get("safety_lock", False)
     
     with st.form("p_form"):
         path = st.text_input("Path", placeholder="/ifs/data/...")

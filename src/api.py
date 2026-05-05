@@ -358,11 +358,6 @@ class IsilonAPI:
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
 
-    def get_protocol_mapping(self) -> Dict[str, str]:
-        """Legacy function - returns path -> protocol mapping."""
-        all_paths = self.get_all_paths()
-        return {path: info["protocol"] for path, info in all_paths.items()}
-
     def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
             params = {"limit": limit}
