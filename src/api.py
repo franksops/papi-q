@@ -589,6 +589,58 @@ class IsilonAPI:
     def list_access_zones(self) -> List[str]:
         return list(self.get_access_zones_info().keys())
 
+    def debug_zone_discovery(self) -> Dict[str, Any]:
+        """Debug function to understand zone discovery. Returns raw data for diagnosis."""
+        debug_info = {
+            "zones_api_available": self.zones_api is not None,
+            "namespaces_api_available": self.namespaces_api is not None,
+            "protocols_api_available": self.protocols_api is not None,
+            "quota_api_available": self.quota_api is not None,
+            "zones_info": {},
+            "sample_quotas": [],
+        }
+        
+        # Try Zones API
+        if self.zones_api:
+            for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
+                method = getattr(self.zones_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        zones = (getattr(resp, "zones", None) or 
+                                getattr(resp, "access_zones", None) or
+                                getattr(resp, "items", None) or
+                                resp if isinstance(resp, (list, tuple)) else None)
+                        if zones:
+                            debug_info["zones_api_method"] = method_name
+                            debug_info["zones_api_response"] = str(zones)[:1000]
+                            break
+                    except Exception as e:
+                        debug_info[f"zones_api_{method_name}_error"] = str(e)
+        
+        # Try Quota API - get sample quotas
+        try:
+            method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
+            resp = method(limit=5)
+            if hasattr(resp, "quotas") and resp.quotas:
+                for q in list(resp.quotas)[:3]:
+                    sample = {
+                        "id": getattr(q, "id", "N/A"),
+                        "path": getattr(q, "path", "N/A"),
+                        "zone_attr": getattr(q, "zone", "NOT_FOUND"),
+                        "access_zone_attr": getattr(q, "access_zone", "NOT_FOUND"),
+                        "zone_name_attr": getattr(q, "zone_name", "NOT_FOUND"),
+                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()[:200]}
+                    }
+                    debug_info["sample_quotas"].append(sample)
+        except Exception as e:
+            debug_info["quota_sample_error"] = str(e)
+        
+        # Get final zones_info
+        debug_info["zones_info"] = self.get_access_zones_info()
+        
+        return debug_info
+
     def get_raw_quota(self, quota_id: str) -> Dict[str, Any]:
         """Fetch raw quota dictionary for the Dynamic Grid."""
         try:

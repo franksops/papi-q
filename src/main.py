@@ -122,13 +122,14 @@ def main():
 
 
 def dashboard():
-    tabs = st.tabs(["📈 Dashboard", "🔧 Universal Manager", "➕ Provision", "📜 Audit History", "📥 Export"])
+    tabs = st.tabs(["📈 Dashboard", "🔧 Universal Manager", "➕ Provision", "📜 Audit History", "📥 Export", "🔍 Debug Zones"])
     
     with tabs[0]: monitoring_tab()
     with tabs[1]: modify_tab()
     with tabs[2]: provision_tab()
     with tabs[3]: audit_tab()
     with tabs[4]: export_tab()
+    with tabs[5]: debug_zones_tab()
 
 
 def monitoring_tab():
@@ -392,3 +393,38 @@ def export_tab():
                 data = [ {**q.to_dict(), "Protocol": mapping.get(q.path, "-")} for q in qs ]
                 st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
             except Exception as e: st.error(e)
+
+
+def debug_zones_tab():
+    st.header("🔍 Zone Debugging")
+    st.caption("Use this to diagnose zone discovery issues.")
+    api = state.api_client
+    
+    if st.button("🔄 Run Zone Discovery Debug"):
+        with st.spinner("Analyzing zone data..."):
+            debug = api.debug_zone_discovery()
+            
+            st.subheader("Available APIs")
+            st.json({
+                "zones_api": debug["zones_api_available"],
+                "namespaces_api": debug["namespaces_api_available"],
+                "protocols_api": debug["protocols_api_available"],
+                "quota_api": debug["quota_api_available"],
+            })
+            
+            st.subheader("Zones Info (Final)")
+            st.json(debug["zones_info"])
+            
+            st.subheader("Sample Quotas (First 3)")
+            for i, sample in enumerate(debug["sample_quotas"]):
+                with st.expander(f"Quota {i+1}: {sample['path']}", expanded=True):
+                    st.write(f"**ID:** {sample['id']}")
+                    st.write(f"**Path:** {sample['path']}")
+                    st.write(f"**zone attribute:** {sample['zone_attr']}")
+                    st.write(f"**access_zone attribute:** {sample['access_zone_attr']}")
+                    st.write(f"**zone_name attribute:** {sample['zone_name_attr']}")
+                    st.write(f"**All zone-related raw attrs:**")
+                    st.json(sample["raw_attrs"])
+            
+            st.subheader("Raw API Responses")
+            st.json({k: v for k, v in debug.items() if k.startswith("zones_api_") or k.startswith("quota_")})
