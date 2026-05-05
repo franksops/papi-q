@@ -441,7 +441,6 @@ class IsilonAPI:
                         break
                     except: continue
 
-            self.sdk = sdk
             self._models = {}
             
             # 3. Universal Component Discovery
