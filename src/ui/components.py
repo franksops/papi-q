@@ -36,10 +36,15 @@ def render_dynamic_grid(obj: Dict[str, Any], key_prefix: str = "dynamic") -> Dic
                 modified_payload[key] = new_val
         elif isinstance(val, (int, float)):
             if "limit" in key.lower() or key in ["hard", "soft", "advisory"]:
-                st.info(f"💡 {key} = {bytes_to_gb(val):,.2f} GB")
-            new_val = st.number_input(key, value=val, key=f"{key_prefix}_{key}")
-            if new_val != val:
-                modified_payload[key] = new_val
+                # Show GB for limits, convert back to bytes on edit
+                display_val = bytes_to_gb(val)
+                new_val = st.number_input(f"{key} (GB)", value=display_val, key=f"{key_prefix}_{key}")
+                if new_val != display_val:
+                    modified_payload[key] = int(new_val * (1024 ** 3))
+            else:
+                new_val = st.number_input(key, value=val, key=f"{key_prefix}_{key}")
+                if new_val != val:
+                    modified_payload[key] = new_val
         elif isinstance(val, str):
             new_val = st.text_input(key, value=val, key=f"{key_prefix}_{key}")
             if new_val != val:
