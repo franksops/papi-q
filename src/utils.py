@@ -19,7 +19,7 @@ def format_size(value: int) -> str:
     if not value:
         return "0 bytes"
     if value >= (1024 ** 4):
-        return f"{bytes_to_tb(value):,.2f} TB"
+        return f"{round(value / (1024 ** 4), 2):,.2f} TB"
     elif value >= (1024 ** 3):
         return f"{bytes_to_gb(value):,.2f} GB"
     elif value >= (1024 ** 2):
