@@ -139,13 +139,29 @@ def monitoring_tab():
     if not state.quotas_loaded:
         with st.spinner("Fetching cluster-wide inventory..."):
             try:
+                # Get zones first to know what's available
+                state.zones = api.list_access_zones()
+                log_info(f"Discovered access zones: {state.zones}")
+                
+                # Fetch all quotas across all zones
                 state.quotas = api.list_all_quotas()
                 state.protocol_map = api.get_protocol_mapping()
-                state.zones = api.list_access_zones()
                 state.quotas_loaded = True
             except Exception as e:
                 if not handle_api_error(e): st.error(f"Inventory Failed: {e}")
                 return
+
+    # Show zone summary
+    zones_in_data = sorted(list(set(q.access_zone for q in state.quotas)))
+    zone_quota_counts = {z: len([q for q in state.quotas if q.access_zone == z]) for z in zones_in_data}
+    
+    zone_info_expander = st.expander(f"📍 Access Zones ({len(zones_in_data)} zones found, {len(state.quotas)} total quotas)", expanded=True)
+    with zone_info_expander:
+        zc1, zc2, zc3 = st.columns(3)
+        for idx, (zone, count) in enumerate(zone_quota_counts.items()):
+            col = [zc1, zc2, zc3][idx % 3]
+            with col:
+                st.metric(f"Zone: {zone}", f"{count} quotas")
 
     # 2. Dashboard KPIs
     off = get_top_offenders(state.quotas)
@@ -165,7 +181,10 @@ def monitoring_tab():
     # 3. Filtering & Search
     sc, zc, gc = st.columns([2, 1, 1])
     search = sc.text_input("Search (Path or Share Name)")
-    zone_filter = zc.selectbox("Access Zone Filter", ["All Zones"] + sorted(state.get("zones", ["System"])))
+    
+    # Use zones from data for filtering (more reliable than API list)
+    available_zones = ["All Zones"] + sorted(zones_in_data)
+    zone_filter = zc.selectbox("Access Zone Filter", available_zones)
     group_by_zone = gc.checkbox("Group by Zone", value=False)
     
     # 4. Filter and Group
@@ -174,15 +193,19 @@ def monitoring_tab():
     # Sort by usage descending by default to show offenders at top
     filt.sort(key=lambda x: x.usage_percent, reverse=True)
     
-    st.markdown(f"**Results:** {len(filt)} Quotas")
+    st.markdown(f"**Showing:** {len(filt)} of {len(state.quotas)} Quotas")
     
     if not filt:
         st.info("No records match the current filter.")
         return
 
-    def render_quota_table(quota_list, key_suffix=""):
-        page = st.number_input(f"Page {key_suffix}", min_value=1, value=1, key=f"page_{key_suffix}")
-        items, total = paginate_list(quota_list, page)
+    def render_quota_table(quota_list, key_suffix="", zone_name=None):
+        page_size = 25
+        total_pages = (len(quota_list) + page_size - 1) // page_size if quota_list else 1
+        page = st.number_input(f"Page {key_suffix}", min_value=1, max_value=max(1, total_pages), value=1, key=f"page_{key_suffix}")
+        
+        start = (page - 1) * page_size
+        items = quota_list[start:start + page_size]
         
         if items:
             df_data = []
@@ -198,8 +221,10 @@ def monitoring_tab():
             
             st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
             
+            # Create selection options with zone info
+            sel_options = [f"{q.path} [{q.access_zone}] ({q.usage_percent:.1f}%)" for q in items]
             selected = st.multiselect("Select share to manage in Universal Manager", 
-                                        options=[f"{q.path} ({q.usage_percent:.1f}%)" for q in items],
+                                        options=sel_options,
                                         max_selections=1,
                                         key=f"sel_{key_suffix}")
             if selected:
@@ -208,12 +233,21 @@ def monitoring_tab():
             st.info("No items on this page.")
 
     if group_by_zone:
-        zones_in_filt = sorted(list(set(q.access_zone for q in filt)))
-        for z in zones_in_filt:
-            with st.expander(f"📁 Zone: {z}", expanded=True):
-                zone_items = [q for q in filt if q.access_zone == z]
-                st.caption(f"{len(zone_items)} quotas in this zone")
-                render_quota_table(zone_items, key_suffix=z)
+        # Group by zone - show each zone as expandable section
+        for z in zones_in_data:
+            zone_items = [q for q in filt if q.access_zone == z]
+            if zone_items:
+                zone_usage = sum(q.usage_bytes for q in zone_items)
+                zone_capacity = sum(q.hard_limit_bytes for q in zone_items) if any(q.hard_limit_bytes > 0 for q in zone_items) else None
+                
+                if zone_capacity:
+                    overall_pct = (zone_usage / zone_capacity) * 100 if zone_capacity > 0 else 0
+                    header = f"📁 Zone: {z} ({len(zone_items)} quotas, {overall_pct:.1f}% overall)"
+                else:
+                    header = f"📁 Zone: {z} ({len(zone_items)} quotas)"
+                    
+                with st.expander(header, expanded=True):
+                    render_quota_table(zone_items, key_suffix=f"zone_{z}", zone_name=z)
     else:
         render_quota_table(filt, key_suffix="all")
 
@@ -225,8 +259,17 @@ def modify_tab():
         return
     
     path_key = state.selected_quota_paths[0]
-    quota = next((q for q in state.quotas if f"{q.path} ({q.usage_percent:.1f}%)" == path_key), None)
-    if not quota: return
+    # Handle both old format: "path (usage%)" and new format: "path [zone] (usage%)"
+    quota = None
+    for q in state.quotas:
+        option_new = f"{q.path} [{q.access_zone}] ({q.usage_percent:.1f}%)"
+        option_old = f"{q.path} ({q.usage_percent:.1f}%)"
+        if option_new == path_key or option_old == path_key:
+            quota = q
+            break
+    if not quota: 
+        st.error(f"Could not find quota for selection: {path_key}")
+        return
 
     api = state.api_client
     st.subheader(f"📁 {quota.path}")

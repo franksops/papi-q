@@ -273,24 +273,27 @@ class IsilonAPI:
             # 0.7.0 uses list_quota_quotas, older uses list_quotas
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
             
-            # Try to pass zone parameter - try multiple names as SDKs vary
-            try:
-                # Attempt 1: 'zone' (common in 0.7.0+)
-                p = params.copy()
-                if access_zone and access_zone != "All": p["zone"] = access_zone
-                resp = method(**p)
-            except TypeError:
-                try:
-                    # Attempt 2: 'zones' (sometimes used for multi-zone query)
-                    p = params.copy()
-                    if access_zone and access_zone != "All": p["zones"] = access_zone
-                    resp = method(**p)
-                except TypeError:
-                    # Attempt 3: No zone parameter supported, fallback to System
-                    resp = method(**params)
+            # Track whether zone filtering was successfully applied
+            zone_filtered = False
             
-            # Map with fallback zone info
-            fallback = access_zone if access_zone and access_zone != "All" else "System"
+            # Try to pass zone parameter - different SDKs use different names
+            zone_params_to_try = ["zone", "zones", "zone_name", "access_zone", "az"]
+            
+            for zone_param in zone_params_to_try:
+                try:
+                    p = params.copy()
+                    if access_zone and access_zone != "All": p[zone_param] = access_zone
+                    resp = method(**p)
+                    zone_filtered = True
+                    break
+                except TypeError:
+                    continue
+            
+            if not zone_filtered:
+                # No zone parameter supported by this API version
+                resp = method(**params)
+                log_warning(f"Zone parameter not supported by quota API, fetching all quotas without zone filter")
+            
             return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
@@ -298,105 +301,206 @@ class IsilonAPI:
     def list_all_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None) -> List[QuotaEntry]:
         """Fetch all quotas. Iterates through all zones if access_zone is 'All' or None."""
         all_q = []
+        seen_ids = set()  # Track seen quota IDs to avoid duplicates
         
         # Determine which zones to query
         zones_info = self.get_access_zones_info()
+        
         if access_zone and access_zone != "All":
             zones_to_query = [access_zone]
         else:
             zones_to_query = list(zones_info.keys())
 
-        # Aggregate quotas from all zones
-        for zone in zones_to_query:
-            token = None
-            zone_quotas = []
-            while True:
-                try:
-                    qs, token = self.list_quotas(path, access_zone=zone, token=token)
-                    # Manually ensure zone is set correctly for mapping
-                    for q in qs:
-                        if q.access_zone == "System" and zone != "System":
-                            q.access_zone = zone
-                    zone_quotas.extend(qs)
-                except Exception as e:
-                    log_warning(f"Failed to fetch quotas for zone {zone}: {e}")
-                    break
-                if not token or len(zone_quotas) > 10000: break
-            all_q.extend(zone_quotas)
-        
-        # Deduplicate by ID just in case
-        unique_q = {q.id: q for q in all_q}
-        all_q = list(unique_q.values())
+        log_info(f"Fetching quotas from zones: {zones_to_query}")
 
-        # Enrichment step for any that still say System but match a sub-path
+        # Build sorted zones list for path-based zone assignment (longest path first)
         sorted_zones = []
         for name, p in zones_info.items():
             norm_p = p.rstrip("/")
             if not norm_p.startswith("/ifs"): norm_p = f"/ifs/{norm_p.lstrip('/')}"
             sorted_zones.append((name, norm_p))
         sorted_zones.sort(key=lambda x: len(x[1]), reverse=True)
-        
+
+        # Aggregate quotas from all zones
+        for zone in zones_to_query:
+            token = None
+            zone_quotas = []
+            iteration = 0
+            max_iterations = 100  # Safety limit for pagination
+            
+            while iteration < max_iterations:
+                iteration += 1
+                try:
+                    qs, token = self.list_quotas(path, access_zone=zone, token=token)
+                    
+                    for q in qs:
+                        # Skip duplicates
+                        if q.id in seen_ids:
+                            continue
+                        seen_ids.add(q.id)
+                        
+                        # Ensure zone is set correctly for each quota
+                        # The quota's access_zone comes from API response, but may need override
+                        q_zone = q.access_zone
+                        
+                        # If quota zone is System but we're querying a different zone,
+                        # try to determine correct zone from path
+                        if q_zone == "System" and zone != "System":
+                            q_zone = zone
+                        
+                        # If still System or wrong zone, try path-based assignment
+                        if q_zone == "System" or q_zone not in zones_info:
+                            q_path = q.path.rstrip("/")
+                            if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
+                            
+                            # Find best matching zone by longest path prefix match
+                            q_zone = "System"  # Default
+                            for zone_name, zone_path in sorted_zones:
+                                if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
+                                    q_zone = zone_name
+                                    break
+                        
+                        q.access_zone = q_zone
+                        zone_quotas.append(q)
+                        
+                except Exception as e:
+                    log_warning(f"Failed to fetch quotas for zone {zone}: {e}")
+                    break
+                
+                if not token:
+                    break
+            
+            log_info(f"Fetched {len(zone_quotas)} quotas from zone {zone}")
+            all_q.extend(zone_quotas)
+
+        # Final pass: ensure all quotas have correct zone assignment
         for q in all_q:
             if q.access_zone == "System":
+                # Try path-based assignment one more time
                 q_path = q.path.rstrip("/")
                 if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
+                
                 for zone_name, zone_path in sorted_zones:
                     if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
                         q.access_zone = zone_name
                         break
-            
+        
+        log_info(f"Total quotas fetched: {len(all_q)}")
         return all_q
 
     def get_access_zones_info(self) -> Dict[str, str]:
         """Returns a mapping of Zone Name -> Base Path. Tries multiple API paths for discovery."""
         data = {"System": "/ifs"}
         
+        # Helper to extract zone name and path from various object types
+        def extract_zone(obj) -> Tuple[Optional[str], Optional[str]]:
+            # Try different attribute patterns for zone name
+            name = getattr(obj, "name", None) or getattr(obj, "zonename", None) or getattr(obj, "zone_name", None)
+            if not name: return None, None
+            
+            # Try different attribute patterns for zone path
+            path = (getattr(obj, "path", None) or 
+                    getattr(obj, "base_path", None) or
+                    getattr(obj, "basepath", None) or
+                    getattr(obj, "zone_path", None) or
+                    getattr(obj, "ifs_path", None))
+            return name, path
+        
+        def merge_zones(zones_iterable):
+            """Merge zone entries into data dict, handling duplicates."""
+            if not zones_iterable: return
+            for z in zones_iterable:
+                name, path = extract_zone(z)
+                if name and path:
+                    if name == "System" and (not path or path == "/"): path = "/ifs"
+                    data[name] = path
+        
         # 1. Try Zones API (Modern OneFS 8.x/9.x)
         if self.zones_api:
             try:
-                # v9.x uses list_zones or get_zones
-                method = getattr(self.zones_api, "list_zones", None) or getattr(self.zones_api, "get_zones", None)
-                if method:
-                    resp = method()
-                    # Response can be { "zones": [...] } or { "access_zones": [...] }
-                    zones = getattr(resp, "zones", None) or getattr(resp, "access_zones", None)
-                    if zones:
-                        for z in zones:
-                            path = getattr(z, "path", "")
-                            if z.name == "System" and (not path or path == "/"): path = "/ifs"
-                            if z.name and path: data[z.name] = path
+                # v9.x uses list_zones, get_zones, or list_access_zones
+                for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
+                    method = getattr(self.zones_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            # Response can be { "zones": [...] } or { "access_zones": [...] }
+                            # or direct list/array response
+                            zones = (getattr(resp, "zones", None) or 
+                                    getattr(resp, "access_zones", None) or
+                                    getattr(resp, "items", None) or
+                                    resp if isinstance(resp, (list, tuple)) else None)
+                            if zones:
+                                merge_zones(zones)
+                                if len(data) > 1:  # Found real zones, no need for fallbacks
+                                    break
+                        except Exception:
+                            continue
             except Exception as e:
-                log_warning(f"Zones discovery failed: {e}")
+                log_warning(f"Zones API discovery failed: {e}")
 
         # 2. Try Namespaces API (Legacy/Specific Versions)
-        if len(data) <= 1 and self.namespaces_api:
+        if self.namespaces_api:
             try:
-                method = getattr(self.namespaces_api, "get_access_zones", None) or getattr(self.namespaces_api, "list_access_zones", None)
-                if method:
-                    resp = method()
-                    zones = getattr(resp, "access_zones", None) or getattr(resp, "zones", None)
-                    if zones:
-                        for z in zones:
-                            path = getattr(z, "path", "")
-                            if z.name == "System" and (not path or path == "/"): path = "/ifs"
-                            if z.name and path: data[z.name] = path
+                for method_name in ["get_access_zones", "list_access_zones", "get_zones", "list_zones"]:
+                    method = getattr(self.namespaces_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            zones = (getattr(resp, "access_zones", None) or 
+                                    getattr(resp, "zones", None) or
+                                    getattr(resp, "items", None) or
+                                    resp if isinstance(resp, (list, tuple)) else None)
+                            if zones:
+                                merge_zones(zones)
+                                if len(data) > 1:
+                                    break
+                        except Exception:
+                            continue
             except Exception as e:
                 log_warning(f"Namespaces zone discovery failed: {e}")
 
-        # 3. Try Protocols API (often has access to zone list via a different path)
-        if len(data) <= 1 and self.protocols_api:
+        # 3. Try Protocols API (often has access to zone list)
+        if self.protocols_api:
             try:
-                # Some SDK versions have list_access_zones here
-                method = getattr(self.protocols_api, "list_access_zones", None) or getattr(self.protocols_api, "get_access_zones", None)
-                if method:
-                    resp = method()
-                    zones = getattr(resp, "zones", []) or getattr(resp, "access_zones", [])
-                    for z in zones:
-                        path = getattr(z, "path", "")
-                        if z.name == "System" and (not path or path == "/"): path = "/ifs"
-                        if z.name and path: data[z.name] = path
+                for method_name in ["list_access_zones", "get_access_zones", "list_zones", "get_zones"]:
+                    method = getattr(self.protocols_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            zones = (getattr(resp, "zones", []) or 
+                                    getattr(resp, "access_zones", []) or
+                                    getattr(resp, "items", []) or
+                                    resp if isinstance(resp, (list, tuple)) else [])
+                            if zones:
+                                merge_zones(zones)
+                                if len(data) > 1:
+                                    break
+                        except Exception:
+                            continue
             except Exception as e:
                 log_warning(f"Protocols zone discovery failed: {e}")
+
+        # 4. Try Quota API - sometimes zones can be extracted from quota responses
+        if len(data) <= 1:
+            try:
+                method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas", None)
+                if method:
+                    # Try without zone filter to see all zones
+                    resp = method(limit=100)
+                    if hasattr(resp, "quotas"):
+                        zone_paths = set()
+                        for q in resp.quotas:
+                            zone = getattr(q, "zone", None) or getattr(q, "access_zone", None)
+                            if zone and zone != "System":
+                                # Some APIs return zone in path form, extract zone name
+                                if zone.startswith("/ifs/"):
+                                    zone_name = zone.replace("/ifs/", "").split("/")[0]
+                                    zone_paths.add(zone_name)
+                        for z in zone_paths:
+                            if z: data[z] = f"/ifs/{z}"
+            except Exception as e:
+                log_warning(f"Quota-based zone discovery failed: {e}")
 
         return data
 
