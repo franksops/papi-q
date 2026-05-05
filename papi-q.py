@@ -584,40 +584,60 @@ class IsilonAPI:
             comment=getattr(q, "comment", ""),
         )
 
+    def get_all_paths(self) -> List[Dict[str, Any]]:
+        """
+        Get ALL filesystem paths from SMB shares and NFS exports across ALL zones.
+        Returns a list of dicts with path, protocol, zone, and quota info.
+        """
+        all_paths = {}  # path -> {protocol, zone, quota_info}
+        
+        zones = self.list_access_zones()
+        log_info(f"Getting all paths from {len(zones)} zones")
+        
+        for zone in zones:
+            # SMB Shares
+            if self.shares_api:
+                try:
+                    method = getattr(self.shares_api, "list_smb_shares", None) or getattr(self.shares_api, "list_smb_share", None)
+                    if method:
+                        resp = method(zone=zone)
+                        shares = getattr(resp, "shares", None) or resp
+                        for s in shares:
+                            path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
+                            if path:
+                                if path not in all_paths:
+                                    all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
+                                current = all_paths[path]["protocol"]
+                                all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+                except Exception as e:
+                    log_warning(f"SMB listing failed for zone {zone}: {e}")
+            
+            # NFS Exports
+            if self.protocols_api:
+                try:
+                    method = getattr(self.protocols_api, "list_nfs_exports", None) or getattr(self.protocols_api, "list_nfs_export", None)
+                    if method:
+                        resp = method(zone=zone)
+                        exports = getattr(resp, "exports", None) or resp
+                        for e in exports:
+                            paths = getattr(e, "paths", []) or []
+                            for p in paths:
+                                path = p.rstrip("/")
+                                if path:
+                                    if path not in all_paths:
+                                        all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
+                                    current = all_paths[path]["protocol"]
+                                    all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+                except Exception as e:
+                    log_warning(f"NFS listing failed for zone {zone}: {e}")
+        
+        log_info(f"Found {len(all_paths)} unique paths across all zones")
+        return all_paths
+
     def get_protocol_mapping(self) -> Dict[str, str]:
-        """Fetch all SMB shares and NFS exports from ALL zones and map paths to protocols."""
-        mapping = {}
-        try:
-            zones = self.list_access_zones()
-            for zone in zones:
-                # Map SMB Shares
-                if self.shares_api:
-                    try:
-                        # Some versions might require different arguments or have different response formats
-                        method = getattr(self.shares_api, "list_smb_shares", None)
-                        if method:
-                            smb = method(zone=zone)
-                            for s in smb.shares:
-                                mapping[s.path.rstrip("/")] = "SMB"
-                    except Exception as e:
-                        log_warning(f"SMB mapping failed for zone {zone}: {e}")
-                
-                # Map NFS Exports
-                if self.protocols_api:
-                    try:
-                        method = getattr(self.protocols_api, "list_nfs_exports", None)
-                        if method:
-                            nfs = method(zone=zone)
-                            for e in nfs.exports:
-                                for p in e.paths:
-                                    normalized_p = p.rstrip("/")
-                                    current = mapping.get(normalized_p, "")
-                                    mapping[normalized_p] = "SMB, NFS" if current == "SMB" else "NFS"
-                    except Exception as e:
-                        log_warning(f"NFS mapping failed for zone {zone}: {e}")
-        except Exception as e:
-            log_warning(f"Protocol mapping failed: {e}")
-        return mapping
+        """Legacy function - returns path -> protocol mapping."""
+        all_paths = self.get_all_paths()
+        return {path: info["protocol"] for path, info in all_paths.items()}
 
     def list_quotas(self, path: Optional[str] = None, access_zone: Optional[str] = None, limit: int = 1000, token: Optional[str] = None) -> Tuple[List[QuotaEntry], Optional[str]]:
         try:
@@ -1507,36 +1527,72 @@ def monitoring_tab():
     st.header("Cluster Overview")
     api = state.api_client
     
-    # 1. Data Retrieval
+    # 1. Data Retrieval - Fetch ALL paths (SMB/NFS) and merge with quotas
     if not state.quotas_loaded:
-        with st.spinner("Fetching cluster-wide inventory..."):
+        with st.spinner("Fetching all shares, exports, and quotas..."):
             try:
-                # Get zones first to know what's available
+                # Get zones first
                 state.zones = api.list_access_zones()
                 log_info(f"Discovered access zones: {state.zones}")
                 
-                # Fetch all quotas across all zones
-                state.quotas = api.list_all_quotas()
-                state.protocol_map = api.get_protocol_mapping()
+                # Get ALL paths from SMB shares and NFS exports
+                all_paths = api.get_all_paths()
+                log_info(f"Found {len(all_paths)} paths from SMB/NFS")
+                
+                # Get quotas
+                quotas = api.list_all_quotas()
+                log_info(f"Found {len(quotas)} quotas")
+                
+                # Build quota lookup by path
+                quota_by_path = {}
+                for q in quotas:
+                    # Normalize path
+                    norm_path = q.path.rstrip("/")
+                    quota_by_path[norm_path] = q
+                
+                # Merge paths with quota info
+                state.all_paths_merged = []
+                for path, info in all_paths.items():
+                    quota = quota_by_path.get(path)
+                    state.all_paths_merged.append({
+                        "path": path,
+                        "protocol": info["protocol"] or "-",
+                        "zone": info["zone"],
+                        "has_quota": quota is not None,
+                        "quota": quota,
+                        "usage_percent": quota.usage_percent if quota else 0,
+                        "hard_limit_gb": quota.hard_limit_gb if quota else 0,
+                        "usage_gb": quota.usage_gb if quota else 0,
+                        "status": quota.status if quota else None,
+                    })
+                
+                state.quotas = quotas  # Keep for modify_tab
                 state.quotas_loaded = True
+                
             except Exception as e:
                 if not handle_api_error(e): st.error(f"Inventory Failed: {e}")
                 return
 
-    # Show zone summary
-    zones_in_data = sorted(list(set(q.access_zone for q in state.quotas)))
-    zone_quota_counts = {z: len([q for q in state.quotas if q.access_zone == z]) for z in zones_in_data}
+    # Zone summary
+    zones_in_data = sorted(list(set(p["zone"] for p in state.all_paths_merged)))
+    zone_counts = {}
+    zone_quota_counts = {}
+    for z in zones_in_data:
+        zone_paths = [p for p in state.all_paths_merged if p["zone"] == z]
+        zone_counts[z] = len(zone_paths)
+        zone_quota_counts[z] = len([p for p in zone_paths if p["has_quota"]])
     
-    zone_info_expander = st.expander(f"📍 Access Zones ({len(zones_in_data)} zones found, {len(state.quotas)} total quotas)", expanded=True)
+    zone_info_expander = st.expander(f"📍 Access Zones ({len(zones_in_data)} zones, {len(state.all_paths_merged)} total paths, {len(state.quotas)} with quotas)", expanded=True)
     with zone_info_expander:
         zc1, zc2, zc3 = st.columns(3)
-        for idx, (zone, count) in enumerate(zone_quota_counts.items()):
+        for idx, zone in enumerate(zones_in_data):
             col = [zc1, zc2, zc3][idx % 3]
             with col:
-                st.metric(f"Zone: {zone}", f"{count} quotas")
+                st.metric(f"Zone: {zone}", f"{zone_counts[zone]} paths ({zone_quota_counts[zone]} quotas)")
 
-    # 2. Dashboard KPIs
-    off = get_top_offenders(state.quotas)
+    # KPIs - only for paths with quotas
+    paths_with_quotas = [p for p in state.all_paths_merged if p["has_quota"]]
+    off = get_top_offenders([p["quota"] for p in paths_with_quotas])
     c1, c2, c3 = st.columns(3)
     with c1:
         st.markdown("<h4 style='color:#D72638'>🔴 Critical (>95%)</h4>", unsafe_allow_html=True)
@@ -1551,77 +1607,95 @@ def monitoring_tab():
     st.divider()
 
     # 3. Filtering & Search
-    sc, zc, gc = st.columns([2, 1, 1])
+    sc, zc, gc, qc = st.columns([2, 1, 1, 1])
     search = sc.text_input("Search (Path or Share Name)")
     
-    # Use zones from data for filtering (more reliable than API list)
     available_zones = ["All Zones"] + sorted(zones_in_data)
-    zone_filter = zc.selectbox("Access Zone Filter", available_zones)
+    zone_filter = zc.selectbox("Zone Filter", available_zones)
     group_by_zone = gc.checkbox("Group by Zone", value=False)
+    show_only_quotas = qc.checkbox("Has Quota Only", value=False)
     
-    # 4. Filter and Group
-    filt = filter_quotas(state.quotas, search, None if zone_filter == "All Zones" else zone_filter)
+    # 4. Filter
+    filt = state.all_paths_merged
+    if search:
+        filt = [p for p in filt if search.lower() in p["path"].lower()]
+    if zone_filter != "All Zones":
+        filt = [p for p in filt if p["zone"] == zone_filter]
+    if show_only_quotas:
+        filt = [p for p in filt if p["has_quota"]]
     
-    # Sort by usage descending by default to show offenders at top
-    filt.sort(key=lambda x: x.usage_percent, reverse=True)
+    # Sort - quotas first by usage, then paths without quotas
+    filt.sort(key=lambda x: (-x["usage_percent"] if x["has_quota"] else 0, x["path"]))
     
-    st.markdown(f"**Showing:** {len(filt)} of {len(state.quotas)} Quotas")
+    st.markdown(f"**Showing:** {len(filt)} of {len(state.all_paths_merged)} paths ({len([p for p in filt if p['has_quota']])} with quotas)")
     
     if not filt:
-        st.info("No records match the current filter.")
+        st.info("No paths match the current filter.")
         return
 
-    def render_quota_table(quota_list, key_suffix="", zone_name=None):
+    def render_path_table(paths, key_suffix=""):
         page_size = 25
-        total_pages = (len(quota_list) + page_size - 1) // page_size if quota_list else 1
+        total_pages = (len(paths) + page_size - 1) // page_size if paths else 1
         page = st.number_input(f"Page {key_suffix}", min_value=1, max_value=max(1, total_pages), value=1, key=f"page_{key_suffix}")
         
         start = (page - 1) * page_size
-        items = quota_list[start:start + page_size]
+        items = paths[start:start + page_size]
         
         if items:
             df_data = []
-            for q in items:
+            for p in items:
+                quota_status = ""
+                usage_info = ""
+                if p["has_quota"]:
+                    quota_status = f"{status_badge(p['status'])} {p['status'].value.upper() if p['status'] else 'N/A'}"
+                    usage_info = f"{p['usage_percent']:.1f}%"
+                else:
+                    quota_status = "❌ No Quota"
+                    usage_info = "N/A"
+                
                 df_data.append({
-                    "Share": q.path.split("/")[-1],
-                    "Protocol": state.protocol_map.get(q.path, "-"),
-                    "Zone": q.access_zone,
-                    "Path": q.path,
-                    "Usage %": f"{q.usage_percent:.1f}%",
-                    "Status": f"{status_badge(q.status)} {q.status.value.upper()}"
+                    "Share": p["path"].split("/")[-1],
+                    "Protocol": p["protocol"],
+                    "Zone": p["zone"],
+                    "Path": p["path"],
+                    "Quota": "✅" if p["has_quota"] else "❌",
+                    "Usage %": usage_info,
+                    "Status": quota_status
                 })
             
             st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
             
-            # Create selection options with zone info
-            sel_options = [f"{q.path} [{q.access_zone}] ({q.usage_percent:.1f}%)" for q in items]
-            selected = st.multiselect("Select share to manage in Universal Manager", 
-                                        options=sel_options,
-                                        max_selections=1,
-                                        key=f"sel_{key_suffix}")
-            if selected:
-                state.selected_quota_paths = selected
+            # Create selection options - only for paths with quotas
+            sel_options = [f"{p['path']} [{p['zone']}] ({p['usage_percent']:.1f}%)" for p in items if p["has_quota"]]
+            if sel_options:
+                selected = st.multiselect("Select path with quota to manage", 
+                                            options=sel_options,
+                                            max_selections=1,
+                                            key=f"sel_{key_suffix}")
+                if selected:
+                    state.selected_quota_paths = selected
         else:
             st.info("No items on this page.")
 
     if group_by_zone:
         # Group by zone - show each zone as expandable section
         for z in zones_in_data:
-            zone_items = [q for q in filt if q.access_zone == z]
+            zone_items = [p for p in filt if p["zone"] == z]
             if zone_items:
-                zone_usage = sum(q.usage_bytes for q in zone_items)
-                zone_capacity = sum(q.hard_limit_bytes for q in zone_items) if any(q.hard_limit_bytes > 0 for q in zone_items) else None
+                quotas_in_zone = [p for p in zone_items if p["has_quota"]]
+                zone_usage = sum(p["quota"].usage_bytes for p in quotas_in_zone if p["quota"])
+                zone_capacity = sum(p["quota"].hard_limit_bytes for p in quotas_in_zone if p["quota"] and p["quota"].hard_limit_bytes > 0)
                 
-                if zone_capacity:
+                if zone_capacity > 0:
                     overall_pct = (zone_usage / zone_capacity) * 100 if zone_capacity > 0 else 0
-                    header = f"📁 Zone: {z} ({len(zone_items)} quotas, {overall_pct:.1f}% overall)"
+                    header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas, {overall_pct:.1f}% used)"
                 else:
-                    header = f"📁 Zone: {z} ({len(zone_items)} quotas)"
+                    header = f"📁 Zone: {z} ({len(zone_items)} paths, {len(quotas_in_zone)} quotas)"
                     
                 with st.expander(header, expanded=True):
-                    render_quota_table(zone_items, key_suffix=f"zone_{z}", zone_name=z)
+                    render_path_table(zone_items, key_suffix=f"zone_{z}")
     else:
-        render_quota_table(filt, key_suffix="all")
+        render_path_table(filt, key_suffix="all")
 
 
 def modify_tab():
