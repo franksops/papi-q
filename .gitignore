@@ -1,48 +1,161 @@
-# Virtual environments
+# =============================================================================
+# SECURITY - NEVER COMMIT THESE
+# =============================================================================
+
+# Credentials and secrets
+*.pem
+*.key
+*.crt
+*.cert
+*.secret
+*.credentials
+*.env
+.env
+.env.*
+secrets.toml
+secrets.json
+secrets.yaml
+api_key*
+api_key_*
+
+# Cluster/infrastructure configs (may expose internal hostnames)
+clusters.json
+state/
+audit*.csv
+*.backup
+
+# User uploads
+user_uploads/
+user_upload/
+
+
+# =============================================================================
+# PYTHON
+# =============================================================================
+
 venv/
 env/
 .venv/
 __pycache__/
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-.project
-.pydevproject
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-*.log
-
-# Config files (may contain sensitive data)
-.papi-q/config.json
-isilon_admin_audit.csv
-*.csv
-
-# Development artifacts
+*.py[cod]
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
 dist/
 build/
-*.egg-info/
-*.pyc
+
+# Virtual environment markers
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.nox/
+.hypothesis/
+
+
+# =============================================================================
+# IDE / EDITORS
+# =============================================================================
+
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/shelf.xml
+*.sublime-workspace
+*.sublime-project
+
+
+# =============================================================================
+# OS / SYSTEM
+# =============================================================================
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+
+# =============================================================================
+# LOGS
+# =============================================================================
+
+*.log
+logs/
+*.log.*
+
+
+# =============================================================================
+# TESTING / COVERAGE
+# =============================================================================
+
 .pytest_cache/
-
-# Documentation (not needed on workstations)
-PLAN.md
-AGENTS.md
-docs/API.md
-docs/QUICKSTART.md
-src/docs/
-
-# Development-only scripts
-setup.sh
-.github/
-
-# Testing
 .pytest_cache/
-coverage/
+.coverage
+.coverage.*
 htmlcov/
+.tox/
+.nox/
+coverage/
+cover/
+*.cover
+
+
+# =============================================================================
+# BUILD / PACKAGING
+# =============================================================================
+
+*.zip
+*.tar
+*.tar.gz
+*.whl
+*.egg
+build/
+dist/
+*.pkg
+*.dmg
+
+
+# =============================================================================
+# DOCUMENTATION (local/custom)
+# =============================================================================
+
+PLAN.md
+PLAN.md.bak
+AGENTS.md
+GEMINI.md
+changes.md
+*.bak
+
+
+# =============================================================================
+# CONFIGURATION (local)
+# =============================================================================
+
+.streamlit/
+.config/
+*.local.toml
+
+
+# =============================================================================
+# GITHUB / CI (not needed in repo)
+# =============================================================================
+
+.github/
+.gitlab-ci.yml
+.travis.yml
+Jenkinsfile
+azure-pipelines.yml
+bitbucket-pipelines.yml
