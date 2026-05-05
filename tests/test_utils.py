@@ -1,5 +1,5 @@
 import unittest
-from src.api import QuotaEntry
+from src.api import QuotaEntry, _match_path_to_zone
 from src.utils import filter_quotas, get_top_offenders, paginate_list, bytes_to_gb
 
 class TestUtils(unittest.TestCase):
@@ -25,6 +25,33 @@ class TestUtils(unittest.TestCase):
     def test_bytes_to_gb_null(self):
         self.assertEqual(bytes_to_gb(0), 0.0)
         self.assertEqual(bytes_to_gb(None), 0.0)
+
+    def test_match_path_to_zone(self):
+        """Test path to zone matching."""
+        zones = {
+            "System": "/ifs",
+            "Zone1": "/ifs/data/zone1",
+            "Zone2": "/ifs/data/zone2"
+        }
+        
+        # Test exact zone base path match
+        self.assertEqual(_match_path_to_zone("/ifs/data/zone1", zones), "Zone1")
+        
+        # Test path under zone
+        self.assertEqual(_match_path_to_zone("/ifs/data/zone1/project1", zones), "Zone1")
+        self.assertEqual(_match_path_to_zone("/ifs/data/zone1/deep/nested/path", zones), "Zone1")
+        
+        # Test different zone
+        self.assertEqual(_match_path_to_zone("/ifs/data/zone2/project2", zones), "Zone2")
+        
+        # Test System default
+        self.assertEqual(_match_path_to_zone("/ifs/other/path", zones), "System")
+        
+        # Test without /ifs prefix
+        self.assertEqual(_match_path_to_zone("data/zone1/project", zones), "Zone1")
+        
+        # Test longest match wins
+        self.assertEqual(_match_path_to_zone("/ifs/data/zone1", zones), "Zone1")
 
 if __name__ == "__main__":
     unittest.main()

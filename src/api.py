@@ -77,6 +77,41 @@ class QuotaEntry:
         }
 
 
+def _match_path_to_zone(path: str, zones_info: Dict[str, str]) -> str:
+    """
+    Match a quota path to the correct access zone based on longest path prefix match.
+    
+    OneFS zones have base paths like:
+    - System: /ifs
+    - Zone1: /ifs/data/zone1
+    - Zone2: /ifs/data/zone2
+    
+    A quota path like /ifs/data/zone1/project1 should match Zone1.
+    """
+    # Normalize the path
+    norm_path = path.rstrip("/")
+    if not norm_path.startswith("/ifs"):
+        norm_path = f"/ifs/{norm_path.lstrip('/')}"
+    
+    # Build sorted zones list (longest path first for best match)
+    sorted_zones = []
+    for name, zone_base in zones_info.items():
+        norm_base = zone_base.rstrip("/")
+        if not norm_base.startswith("/ifs"):
+            norm_base = f"/ifs/{norm_base.lstrip('/')}"
+        sorted_zones.append((name, norm_base))
+    sorted_zones.sort(key=lambda x: len(x[1]), reverse=True)
+    
+    # Find best matching zone (longest prefix match)
+    for zone_name, zone_path in sorted_zones:
+        # Exact match or path is under zone's base path
+        if norm_path == zone_path or norm_path.startswith(f"{zone_path}/"):
+            return zone_name
+    
+    # Default to System
+    return "System"
+
+
 class IsilonAPI:
     """Wrapper for Isilon SDK API interactions."""
     
@@ -205,7 +240,7 @@ class IsilonAPI:
             log_error("SDK Initialization Failed", e)
             raise
 
-    def _map_quota_response(self, q: Any) -> QuotaEntry:
+    def _map_quota_response(self, q: Any, default_zone: Optional[str] = None) -> QuotaEntry:
         # Robust mapping for nested PAPI objects (0.7.0 uses 'thresholds', older uses 'limits')
         lims = getattr(q, "thresholds", None) or getattr(q, "limits", None)
         usage_obj = getattr(q, "usage", None)
@@ -217,6 +252,40 @@ class IsilonAPI:
             usage_val = (getattr(usage_obj, "fslogical", 0) or 
                          getattr(usage_obj, "logical", 0) or 
                          getattr(usage_obj, "physical", 0) or 0)
+        
+        # Extract zone - try multiple attribute names and locations
+        zone = (getattr(q, "zone", None) or 
+                getattr(q, "access_zone", None) or 
+                getattr(q, "zone_name", None) or
+                getattr(q, "az", None) or
+                getattr(q, "_zone", None) or
+                default_zone)
+        
+        # If still no zone, try to extract from nested objects
+        if not zone:
+            # Some SDKs nest zone info
+            for attr in ["properties", "attrs", "metadata", "info"]:
+                nested = getattr(q, attr, None)
+                if nested:
+                    zone = (getattr(nested, "zone", None) or 
+                           getattr(nested, "access_zone", None))
+                    if zone: break
+        
+        # If no zone found, leave as System for now - will be corrected in list_all_quotas
+        zone = zone or "System"
+        
+        # Debug: log raw quota attributes if zone looks wrong
+        if zone == "System":
+            # Check if there's zone info hidden elsewhere
+            all_attrs = [a for a in dir(q) if not a.startswith('_')]
+            zone_attrs = [a for a in all_attrs if 'zone' in a.lower()]
+            if zone_attrs:
+                for za in zone_attrs[:3]:  # Log first 3
+                    val = getattr(q, za, None)
+                    if val and val != "System":
+                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {q.id}")
+                        zone = val
+                        break
                          
         return QuotaEntry(
             id=q.id, path=q.path,
@@ -225,7 +294,7 @@ class IsilonAPI:
             usage_bytes=usage_val,
             users=getattr(q, "users", []) or [],
             groups=getattr(q, "groups", []) or [],
-            access_zone=getattr(q, "zone", "System") or "System",
+            access_zone=zone,
             comment=getattr(q, "comment", ""),
         )
 
@@ -275,6 +344,7 @@ class IsilonAPI:
             
             # Track whether zone filtering was successfully applied
             zone_filtered = False
+            zone_param_used = None
             
             # Try to pass zone parameter - different SDKs use different names
             zone_params_to_try = ["zone", "zones", "zone_name", "access_zone", "az"]
@@ -285,6 +355,7 @@ class IsilonAPI:
                     if access_zone and access_zone != "All": p[zone_param] = access_zone
                     resp = method(**p)
                     zone_filtered = True
+                    zone_param_used = zone_param
                     break
                 except TypeError:
                     continue
@@ -293,8 +364,12 @@ class IsilonAPI:
                 # No zone parameter supported by this API version
                 resp = method(**params)
                 log_warning(f"Zone parameter not supported by quota API, fetching all quotas without zone filter")
+            else:
+                log_info(f"Zone filtering used: param={zone_param_used}, zone={access_zone}")
             
-            return [self._map_quota_response(q) for q in resp.quotas], getattr(resp, "continue", None)
+            # Pass the requested zone to _map_quota_response so it can use it as fallback
+            effective_zone = access_zone if zone_filtered else None
+            return [self._map_quota_response(q, default_zone=effective_zone) for q in resp.quotas], getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
@@ -305,6 +380,7 @@ class IsilonAPI:
         
         # Determine which zones to query
         zones_info = self.get_access_zones_info()
+        log_info(f"Discovered zones: {zones_info}")
         
         if access_zone and access_zone != "All":
             zones_to_query = [access_zone]
@@ -312,14 +388,6 @@ class IsilonAPI:
             zones_to_query = list(zones_info.keys())
 
         log_info(f"Fetching quotas from zones: {zones_to_query}")
-
-        # Build sorted zones list for path-based zone assignment (longest path first)
-        sorted_zones = []
-        for name, p in zones_info.items():
-            norm_p = p.rstrip("/")
-            if not norm_p.startswith("/ifs"): norm_p = f"/ifs/{norm_p.lstrip('/')}"
-            sorted_zones.append((name, norm_p))
-        sorted_zones.sort(key=lambda x: len(x[1]), reverse=True)
 
         # Aggregate quotas from all zones
         for zone in zones_to_query:
@@ -340,25 +408,12 @@ class IsilonAPI:
                         seen_ids.add(q.id)
                         
                         # Ensure zone is set correctly for each quota
-                        # The quota's access_zone comes from API response, but may need override
+                        # Use the zone from API response if valid, otherwise use path-based matching
                         q_zone = q.access_zone
                         
-                        # If quota zone is System but we're querying a different zone,
-                        # try to determine correct zone from path
-                        if q_zone == "System" and zone != "System":
-                            q_zone = zone
-                        
-                        # If still System or wrong zone, try path-based assignment
+                        # If zone is System or not in known zones, use path-based matching
                         if q_zone == "System" or q_zone not in zones_info:
-                            q_path = q.path.rstrip("/")
-                            if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
-                            
-                            # Find best matching zone by longest path prefix match
-                            q_zone = "System"  # Default
-                            for zone_name, zone_path in sorted_zones:
-                                if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
-                                    q_zone = zone_name
-                                    break
+                            q_zone = _match_path_to_zone(q.path, zones_info)
                         
                         q.access_zone = q_zone
                         zone_quotas.append(q)
@@ -373,17 +428,24 @@ class IsilonAPI:
             log_info(f"Fetched {len(zone_quotas)} quotas from zone {zone}")
             all_q.extend(zone_quotas)
 
-        # Final pass: ensure all quotas have correct zone assignment
+        # Final pass: ensure all quotas have correct zone assignment using path matching
+        inferred_zones = {}  # Track zones inferred from paths
         for q in all_q:
             if q.access_zone == "System":
-                # Try path-based assignment one more time
-                q_path = q.path.rstrip("/")
-                if not q_path.startswith("/ifs"): q_path = f"/ifs/{q_path.lstrip('/')}"
-                
-                for zone_name, zone_path in sorted_zones:
-                    if q_path == zone_path or q_path.startswith(f"{zone_path}/"):
-                        q.access_zone = zone_name
-                        break
+                # Try path-based assignment
+                q_zone = _match_path_to_zone(q.path, zones_info)
+                if q_zone != "System":
+                    q.access_zone = q_zone
+                    inferred_zones[q.id] = q_zone
+        
+        if inferred_zones:
+            log_info(f"Inferred {len(inferred_zones)} zones from paths: {set(inferred_zones.values())}")
+        
+        # Also check if any quota has zone info that we can use to infer zone paths
+        # This helps if zones were discovered but paths were wrong
+        quota_zones = set(q.access_zone for q in all_q if q.access_zone != "System")
+        if quota_zones:
+            log_info(f"Zones found in quota data: {quota_zones}")
         
         log_info(f"Total quotas fetched: {len(all_q)}")
         return all_q
@@ -481,26 +543,46 @@ class IsilonAPI:
             except Exception as e:
                 log_warning(f"Protocols zone discovery failed: {e}")
 
-        # 4. Try Quota API - sometimes zones can be extracted from quota responses
-        if len(data) <= 1:
-            try:
-                method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas", None)
-                if method:
-                    # Try without zone filter to see all zones
-                    resp = method(limit=100)
-                    if hasattr(resp, "quotas"):
-                        zone_paths = set()
-                        for q in resp.quotas:
-                            zone = getattr(q, "zone", None) or getattr(q, "access_zone", None)
-                            if zone and zone != "System":
-                                # Some APIs return zone in path form, extract zone name
-                                if zone.startswith("/ifs/"):
-                                    zone_name = zone.replace("/ifs/", "").split("/")[0]
-                                    zone_paths.add(zone_name)
-                        for z in zone_paths:
-                            if z: data[z] = f"/ifs/{z}"
-            except Exception as e:
-                log_warning(f"Quota-based zone discovery failed: {e}")
+        # 4. Try Quota API - extract zones from quota responses (ALWAYS run as supplement)
+        try:
+            method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas", None)
+            if method:
+                # Try without zone filter to see all zones
+                resp = method(limit=100)
+                if hasattr(resp, "quotas") and resp.quotas:
+                    # First pass: extract zones from quota zone attributes
+                    zone_names = set()
+                    for q in resp.quotas:
+                        zone = (getattr(q, "zone", None) or 
+                               getattr(q, "access_zone", None) or
+                               getattr(q, "zone_name", None))
+                        if zone and zone != "System" and zone != "":
+                            zone_names.add(zone)
+                    
+                    # Second pass: extract potential zones from paths
+                    # e.g., /ifs/zone1/data -> zone1
+                    path_zones = set()
+                    for q in resp.quotas:
+                        q_path = getattr(q, "path", "") or ""
+                        if q_path.startswith("/ifs/"):
+                            # Extract second path component as potential zone
+                            # /ifs/zone1/data -> zone1
+                            parts = q_path.strip("/").split("/")
+                            if len(parts) >= 2 and parts[0] == "ifs":
+                                potential_zone = parts[1]
+                                # Only add if it looks like a zone name (not 'data', 'shared', etc.)
+                                if potential_zone not in ["data", "shared", "home", "ifs"]:
+                                    path_zones.add(potential_zone)
+                    
+                    # Merge discovered zones
+                    all_discovered = zone_names | path_zones
+                    for z in all_discovered:
+                        if z and z != "System":
+                            # Use existing path if available, otherwise construct from zone name
+                            if z not in data:
+                                data[z] = f"/ifs/{z}"
+        except Exception as e:
+            log_warning(f"Quota-based zone discovery failed: {e}")
 
         return data
 
