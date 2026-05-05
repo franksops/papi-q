@@ -1,6 +1,6 @@
 import unittest
 from src.api import QuotaEntry, _match_path_to_zone
-from src.utils import filter_quotas, get_top_offenders, paginate_list, bytes_to_gb
+from src.utils import get_top_offenders, bytes_to_gb
 
 class TestUtils(unittest.TestCase):
     def setUp(self):
@@ -17,10 +17,6 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(len(cats["warning"]), 1)
         self.assertEqual(len(cats["notice"]), 1)
         self.assertEqual(cats["critical"][0]["share_name"], "s1")
-
-    def test_filter_zone(self):
-        self.assertEqual(len(filter_quotas(self.quotas, access_zone="DMZ")), 1)
-        self.assertEqual(len(filter_quotas(self.quotas, access_zone="All")), 4)
 
     def test_bytes_to_gb_null(self):
         self.assertEqual(bytes_to_gb(0), 0.0)

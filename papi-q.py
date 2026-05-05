@@ -1134,7 +1134,7 @@ def read_audit_log(cluster: str) -> List[Dict[str, Any]]:
 # --- Source: src/utils.py ---
 
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any
 
 
 
@@ -1144,16 +1144,6 @@ def bytes_to_gb(value: Any) -> float:
         return 0.0
     try:
         return round(float(value) / (1024 ** 3), 2)
-    except (ValueError, TypeError):
-        return 0.0
-
-
-def bytes_to_tb(value: Any) -> float:
-    """Convert bytes to TB."""
-    if not value:
-        return 0.0
-    try:
-        return round(float(value) / (1024 ** 4), 2)
     except (ValueError, TypeError):
         return 0.0
 
@@ -1199,21 +1189,6 @@ def color_for_status(status: Any) -> str:
     return mapping.get(val, "#666666")
 
 
-def filter_quotas(
-    quotas: List[QuotaEntry],
-    share_name: Optional[str] = None,
-    access_zone: Optional[str] = None,
-) -> List[QuotaEntry]:
-    """Filter quotas by name or zone with explicit type support."""
-    results = quotas
-    if share_name:
-        share_lower = share_name.lower()
-        results = [q for q in results if share_lower in q.path.lower()]
-    if access_zone and access_zone != "All":
-        results = [q for q in results if q.access_zone == access_zone]
-    return results
-
-
 def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]]]:
     """Group quotas by usage thresholds (95, 80, 70)."""
     categories = {"critical": [], "warning": [], "notice": []}
@@ -1233,14 +1208,6 @@ def get_top_offenders(quotas: List[QuotaEntry]) -> Dict[str, List[Dict[str, Any]
     for cat in categories:
         categories[cat].sort(key=lambda x: x["usage_percent"], reverse=True)
     return categories
-
-
-def paginate_list(items: List[Any], page: int, page_size: int = 25) -> Tuple[List[Any], int]:
-    """Paginate a list of items."""
-    total_pages = (len(items) + page_size - 1) // page_size if items else 1
-    page = max(1, min(page, total_pages))
-    start = (page - 1) * page_size
-    return items[start:start + page_size], total_pages
 
 
 # --- Source: src/ui/session.py ---
