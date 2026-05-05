@@ -1,7 +1,7 @@
 """Utility functions for SmartQuota Manager."""
 
 from typing import List, Dict, Any
-from src.api import Status, QuotaEntry
+from src.api import QuotaEntry
 
 
 def bytes_to_gb(value: Any) -> float:
