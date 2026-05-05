@@ -444,10 +444,32 @@ def export_tab():
     if st.button("Generate Full CSV Report"):
         with st.spinner("Processing large dataset..."):
             try:
-                qs = state.api_client.list_all_quotas()
-                mapping = state.api_client.get_protocol_mapping()
-                data = [ {**q.to_dict(), "Protocol": mapping.get(q.path, "-")} for q in qs ]
-                st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
+                # Use already-loaded data if available, otherwise fetch
+                if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
+                    # Export all paths with quota info
+                    rows = []
+                    for p in state.all_paths_merged:
+                        row = {
+                            "path": p["path"],
+                            "zone": p["zone"],
+                            "protocol": p["protocol"],
+                            "has_quota": "Yes" if p["has_quota"] else "No",
+                        }
+                        if p["has_quota"]:
+                            row.update({
+                                "hard_limit_gb": p["quota"].hard_limit_gb,
+                                "soft_limit_gb": p["quota"].soft_limit_gb,
+                                "usage_gb": p["quota"].usage_gb,
+                                "usage_percent": round(p["usage_percent"], 1),
+                                "status": p["status"].value if p["status"] else "N/A",
+                            })
+                        rows.append(row)
+                    st.download_button("Download Report", pd.DataFrame(rows).to_csv(index=False), "quota_report.csv")
+                else:
+                    # Fallback: just export quotas
+                    qs = state.api_client.list_all_quotas()
+                    data = [q.to_dict() for q in qs]
+                    st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
             except Exception as e: st.error(e)
 
 

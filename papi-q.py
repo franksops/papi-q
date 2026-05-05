@@ -289,9 +289,7 @@ def remove_cluster(name: str) -> bool:
 import urllib3
 import importlib
 import pkgutil
-import os
 import re
-import sys
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -595,41 +593,53 @@ class IsilonAPI:
         log_info(f"Getting all paths from {len(zones)} zones")
         
         for zone in zones:
-            # SMB Shares
+            # SMB Shares - try both method names
             if self.shares_api:
-                try:
-                    method = getattr(self.shares_api, "list_smb_shares", None) or getattr(self.shares_api, "list_smb_share", None)
+                smb_success = False
+                for method_name in ["list_smb_shares", "list_smb_share"]:
+                    method = getattr(self.shares_api, method_name, None)
                     if method:
-                        resp = method(zone=zone)
-                        shares = getattr(resp, "shares", None) or resp
-                        for s in shares:
-                            path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
-                            if path:
-                                if path not in all_paths:
-                                    all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                current = all_paths[path]["protocol"]
-                                all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
-                except Exception as e:
-                    log_warning(f"SMB listing failed for zone {zone}: {e}")
-            
-            # NFS Exports
-            if self.protocols_api:
-                try:
-                    method = getattr(self.protocols_api, "list_nfs_exports", None) or getattr(self.protocols_api, "list_nfs_export", None)
-                    if method:
-                        resp = method(zone=zone)
-                        exports = getattr(resp, "exports", None) or resp
-                        for e in exports:
-                            paths = getattr(e, "paths", []) or []
-                            for p in paths:
-                                path = p.rstrip("/")
+                        try:
+                            resp = method(zone=zone)
+                            shares = getattr(resp, "shares", None) or resp
+                            for s in shares:
+                                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
                                 if path:
                                     if path not in all_paths:
                                         all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
                                     current = all_paths[path]["protocol"]
-                                    all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
-                except Exception as e:
-                    log_warning(f"NFS listing failed for zone {zone}: {e}")
+                                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+                            smb_success = True
+                            break  # Success, no need to try other method
+                        except Exception:
+                            continue  # Try next method name
+                if not smb_success:
+                    log_warning(f"SMB listing failed for zone {zone}: no working method found")
+            
+            # NFS Exports - try both method names
+            if self.protocols_api:
+                nfs_success = False
+                for method_name in ["list_nfs_exports", "list_nfs_export"]:
+                    method = getattr(self.protocols_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method(zone=zone)
+                            exports = getattr(resp, "exports", None) or resp
+                            for e in exports:
+                                paths = getattr(e, "paths", []) or []
+                                for p in paths:
+                                    path = p.rstrip("/")
+                                    if path:
+                                        if path not in all_paths:
+                                            all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
+                                        current = all_paths[path]["protocol"]
+                                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+                            nfs_success = True
+                            break  # Success, no need to try other method
+                        except Exception:
+                            continue  # Try next method name
+                if not nfs_success:
+                    log_warning(f"NFS listing failed for zone {zone}: no working method found")
         
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
@@ -1835,10 +1845,32 @@ def export_tab():
     if st.button("Generate Full CSV Report"):
         with st.spinner("Processing large dataset..."):
             try:
-                qs = state.api_client.list_all_quotas()
-                mapping = state.api_client.get_protocol_mapping()
-                data = [ {**q.to_dict(), "Protocol": mapping.get(q.path, "-")} for q in qs ]
-                st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
+                # Use already-loaded data if available, otherwise fetch
+                if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
+                    # Export all paths with quota info
+                    rows = []
+                    for p in state.all_paths_merged:
+                        row = {
+                            "path": p["path"],
+                            "zone": p["zone"],
+                            "protocol": p["protocol"],
+                            "has_quota": "Yes" if p["has_quota"] else "No",
+                        }
+                        if p["has_quota"]:
+                            row.update({
+                                "hard_limit_gb": p["quota"].hard_limit_gb,
+                                "soft_limit_gb": p["quota"].soft_limit_gb,
+                                "usage_gb": p["quota"].usage_gb,
+                                "usage_percent": round(p["usage_percent"], 1),
+                                "status": p["status"].value if p["status"] else "N/A",
+                            })
+                        rows.append(row)
+                    st.download_button("Download Report", pd.DataFrame(rows).to_csv(index=False), "quota_report.csv")
+                else:
+                    # Fallback: just export quotas
+                    qs = state.api_client.list_all_quotas()
+                    data = [q.to_dict() for q in qs]
+                    st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
             except Exception as e: st.error(e)
 
 

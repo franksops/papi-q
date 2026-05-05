@@ -3,9 +3,7 @@
 import urllib3
 import importlib
 import pkgutil
-import os
 import re
-import sys
 from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
@@ -309,41 +307,53 @@ class IsilonAPI:
         log_info(f"Getting all paths from {len(zones)} zones")
         
         for zone in zones:
-            # SMB Shares
+            # SMB Shares - try both method names
             if self.shares_api:
-                try:
-                    method = getattr(self.shares_api, "list_smb_shares", None) or getattr(self.shares_api, "list_smb_share", None)
+                smb_success = False
+                for method_name in ["list_smb_shares", "list_smb_share"]:
+                    method = getattr(self.shares_api, method_name, None)
                     if method:
-                        resp = method(zone=zone)
-                        shares = getattr(resp, "shares", None) or resp
-                        for s in shares:
-                            path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
-                            if path:
-                                if path not in all_paths:
-                                    all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                current = all_paths[path]["protocol"]
-                                all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
-                except Exception as e:
-                    log_warning(f"SMB listing failed for zone {zone}: {e}")
-            
-            # NFS Exports
-            if self.protocols_api:
-                try:
-                    method = getattr(self.protocols_api, "list_nfs_exports", None) or getattr(self.protocols_api, "list_nfs_export", None)
-                    if method:
-                        resp = method(zone=zone)
-                        exports = getattr(resp, "exports", None) or resp
-                        for e in exports:
-                            paths = getattr(e, "paths", []) or []
-                            for p in paths:
-                                path = p.rstrip("/")
+                        try:
+                            resp = method(zone=zone)
+                            shares = getattr(resp, "shares", None) or resp
+                            for s in shares:
+                                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
                                 if path:
                                     if path not in all_paths:
                                         all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
                                     current = all_paths[path]["protocol"]
-                                    all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
-                except Exception as e:
-                    log_warning(f"NFS listing failed for zone {zone}: {e}")
+                                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+                            smb_success = True
+                            break  # Success, no need to try other method
+                        except Exception:
+                            continue  # Try next method name
+                if not smb_success:
+                    log_warning(f"SMB listing failed for zone {zone}: no working method found")
+            
+            # NFS Exports - try both method names
+            if self.protocols_api:
+                nfs_success = False
+                for method_name in ["list_nfs_exports", "list_nfs_export"]:
+                    method = getattr(self.protocols_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method(zone=zone)
+                            exports = getattr(resp, "exports", None) or resp
+                            for e in exports:
+                                paths = getattr(e, "paths", []) or []
+                                for p in paths:
+                                    path = p.rstrip("/")
+                                    if path:
+                                        if path not in all_paths:
+                                            all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
+                                        current = all_paths[path]["protocol"]
+                                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+                            nfs_success = True
+                            break  # Success, no need to try other method
+                        except Exception:
+                            continue  # Try next method name
+                if not nfs_success:
+                    log_warning(f"NFS listing failed for zone {zone}: no working method found")
         
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
