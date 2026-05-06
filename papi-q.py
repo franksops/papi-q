@@ -531,34 +531,22 @@ class IsilonAPI:
                 getattr(q, "zone_name", None) or
                 getattr(q, "az", None) or
                 getattr(q, "_zone", None) or
+                getattr(q, "scope", None) or  # OneFS scope attribute
                 default_zone)
         
         # If still no zone, try to extract from nested objects
         if not zone:
             # Some SDKs nest zone info
-            for attr in ["properties", "attrs", "metadata", "info"]:
+            for attr in ["properties", "attrs", "metadata", "info", "quota", "parameters"]:
                 nested = getattr(q, attr, None)
                 if nested:
                     zone = (getattr(nested, "zone", None) or 
-                           getattr(nested, "access_zone", None))
+                           getattr(nested, "access_zone", None) or
+                           getattr(nested, "zone_name", None))
                     if zone: break
         
         # If no zone found, leave as System for now - will be corrected in list_all_quotas
         zone = zone or "System"
-        
-        # Debug: log raw quota attributes if zone looks wrong
-        if zone == "System":
-            # Check if there's zone info hidden elsewhere
-            all_attrs = [a for a in dir(q) if not a.startswith('_')]
-            zone_attrs = [a for a in all_attrs if 'zone' in a.lower()]
-            if zone_attrs:
-                quota_id = getattr(q, "id", "unknown")
-                for za in zone_attrs[:3]:  # Log first 3
-                    val = getattr(q, za, None)
-                    if val and val != "System":
-                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {quota_id}")
-                        zone = val
-                        break
         
         # Safely extract required attributes
         quota_id = getattr(q, "id", None)
@@ -863,7 +851,8 @@ class IsilonAPI:
         
         # 1. Try Zones API (Modern OneFS 8.x/9.x)
         if self.zones_api:
-            for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
+            for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones", 
+                                "list_zone", "get_zone", "zones_list"]:
                 method = getattr(self.zones_api, method_name, None)
                 if method:
                     try:
@@ -876,6 +865,7 @@ class IsilonAPI:
                                 resp if isinstance(resp, (list, tuple)) else None)
                         if zones:
                             merge_zones(zones)
+                            log_info(f"Zones API method {method_name} succeeded")
                             if len(data) > 1:  # Found real zones, no need for fallbacks
                                 break
                     except Exception as e:
@@ -942,23 +932,27 @@ class IsilonAPI:
                         # Some APIs don't support 'continue' parameter
                         resp = method(limit=1000)
                     
-                    if not hasattr(resp, "quotas") or not resp.quotas:
+                    # Handle different response formats
+                    quotas_list = (getattr(resp, "quotas", None) or 
+                                  getattr(resp, "items", None) or 
+                                  resp if isinstance(resp, (list, tuple)) else None)
+                    
+                    if not quotas_list:
+                        log_warning(f"Zone discovery: No quotas found in response (type: {type(resp).__name__})")
                         break
                     
                     # Extract zones from quota attributes
-                    for q in resp.quotas:
+                    for q in quotas_list:
+                        # Try multiple attributes that might contain zone info
                         zone = (getattr(q, "zone", None) or 
                                getattr(q, "access_zone", None) or
-                               getattr(q, "zone_name", None))
+                               getattr(q, "zone_name", None) or
+                               getattr(q, "scope", None) or
+                               getattr(q, "az", None))
                         if zone and zone != "System" and zone != "":
                             all_quota_zones.add(zone)
-                        
-                        # Also try to infer zone from path structure
-                        # Only if quota has a zone attribute that looks like a real zone name
-                        q_path = getattr(q, "path", "") or ""
-                        if q_path.startswith("/ifs/") and zone and zone != "System":
-                            # Use the zone attribute value directly as the zone name
-                            all_quota_zones.add(zone)
+                    
+                    log_info(f"Zone discovery iteration {iterations}: found {len(quotas_list)} quotas, zones so far: {all_quota_zones}")
                     
                     # Check for pagination
                     token = getattr(resp, "continue", None)
@@ -1016,13 +1010,24 @@ class IsilonAPI:
             resp = quota_method(limit=5)
             if hasattr(resp, "quotas") and resp.quotas:
                 for q in list(resp.quotas)[:3]:
+                    # Get all non-private attributes for debugging
+                    all_attrs = {}
+                    for a in dir(q):
+                        if a.startswith('_'): continue
+                        try:
+                            val = getattr(q, a, None)
+                            if not callable(val):  # Skip methods
+                                all_attrs[a] = str(val)[:150]
+                        except: pass
                     sample = {
                         "id": getattr(q, "id", "N/A"),
                         "path": getattr(q, "path", "N/A"),
-                        "zone_attr": getattr(q, "zone", "NOT_FOUND"),
-                        "access_zone_attr": getattr(q, "access_zone", "NOT_FOUND"),
-                        "zone_name_attr": getattr(q, "zone_name", "NOT_FOUND"),
-                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()}
+                        "zone": getattr(q, "zone", "NOT_FOUND"),
+                        "access_zone": getattr(q, "access_zone", "NOT_FOUND"),
+                        "zone_name": getattr(q, "zone_name", "NOT_FOUND"),
+                        "scope": getattr(q, "scope", "NOT_FOUND"),
+                        "az": getattr(q, "az", "NOT_FOUND"),
+                        "all_attrs": all_attrs
                     }
                     debug_info["sample_quotas"].append(sample)
         except Exception as e:
@@ -1980,11 +1985,13 @@ def debug_zones_tab():
                 with st.expander(f"Quota {i+1}: {sample['path']}", expanded=True):
                     st.write(f"**ID:** {sample['id']}")
                     st.write(f"**Path:** {sample['path']}")
-                    st.write(f"**zone attribute:** {sample['zone_attr']}")
-                    st.write(f"**access_zone attribute:** {sample['access_zone_attr']}")
-                    st.write(f"**zone_name attribute:** {sample['zone_name_attr']}")
-                    st.write(f"**All zone-related raw attrs:**")
-                    st.json(sample["raw_attrs"])
+                    st.write(f"**zone:** {sample['zone']}")
+                    st.write(f"**access_zone:** {sample['access_zone']}")
+                    st.write(f"**zone_name:** {sample['zone_name']}")
+                    st.write(f"**scope:** {sample['scope']}")
+                    st.write(f"**az:** {sample['az']}")
+                    st.write("**All attributes:**")
+                    st.json(sample["all_attrs"])
             
             st.subheader("Raw API Responses")
             st.json({k: v for k, v in debug.items() if k.startswith("zones_api_") or k.startswith("quota_")})

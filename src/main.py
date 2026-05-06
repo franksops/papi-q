@@ -535,11 +535,13 @@ def debug_zones_tab():
                 with st.expander(f"Quota {i+1}: {sample['path']}", expanded=True):
                     st.write(f"**ID:** {sample['id']}")
                     st.write(f"**Path:** {sample['path']}")
-                    st.write(f"**zone attribute:** {sample['zone_attr']}")
-                    st.write(f"**access_zone attribute:** {sample['access_zone_attr']}")
-                    st.write(f"**zone_name attribute:** {sample['zone_name_attr']}")
-                    st.write(f"**All zone-related raw attrs:**")
-                    st.json(sample["raw_attrs"])
+                    st.write(f"**zone:** {sample['zone']}")
+                    st.write(f"**access_zone:** {sample['access_zone']}")
+                    st.write(f"**zone_name:** {sample['zone_name']}")
+                    st.write(f"**scope:** {sample['scope']}")
+                    st.write(f"**az:** {sample['az']}")
+                    st.write("**All attributes:**")
+                    st.json(sample["all_attrs"])
             
             st.subheader("Raw API Responses")
             st.json({k: v for k, v in debug.items() if k.startswith("zones_api_") or k.startswith("quota_")})
