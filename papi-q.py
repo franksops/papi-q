@@ -1819,42 +1819,60 @@ def modify_tab():
     with t1:
         try:
             raw = api.get_raw_quota(quota.id)
-            with st.form(f"u_{quota.id}"):
-                payload = render_dynamic_grid(raw, f"e_{quota.id}")
-                st.divider()
+            
+            # Collect modified fields first
+            payload = render_dynamic_grid(raw, f"e_{quota.id}")
+            
+            # Destructive Change Detection (outside form for better UX)
+            destructive_warns = []
+            if "limits" in payload:
+                new_lims = payload["limits"]
+                curr_lims = raw.get("limits", {})
                 
-                # Destructive Change Detection
-                destructive_warns = []
-                if "limits" in payload:
-                    new_lims = payload["limits"]
-                    curr_lims = raw.get("limits", {})
-                    
-                    for key in ["hard", "soft", "advisory"]:
-                        if key in new_lims:
-                            new_val = int(new_lims[key])
-                            curr_val = int(curr_lims.get(key, 0))
-                            if new_val < curr_val and new_val != 0:
-                                destructive_warns.append(f"Reducing {key} limit from {bytes_to_gb(curr_val)}GB to {bytes_to_gb(new_val)}GB.")
-                            if new_val < quota.usage_bytes and new_val != 0:
-                                destructive_warns.append(f"New {key} limit is BELOW current usage ({bytes_to_gb(quota.usage_bytes)}GB)!")
+                for key in ["hard", "soft", "advisory"]:
+                    if key in new_lims:
+                        new_val = int(new_lims[key])
+                        curr_val = int(curr_lims.get(key, 0))
+                        if new_val < curr_val and new_val != 0:
+                            destructive_warns.append(f"Reducing {key} limit from {bytes_to_gb(curr_val)}GB to {bytes_to_gb(new_val)}GB.")
+                        if new_val < quota.usage_bytes and new_val != 0:
+                            destructive_warns.append(f"New {key} limit is BELOW current usage ({bytes_to_gb(quota.usage_bytes)}GB)!")
 
+            with st.form(f"u_{quota.id}", clear_on_submit=False):
+                # Show destructive warnings
                 if destructive_warns:
                     for w in destructive_warns: st.warning(f"⚠️ {w}")
                     confirm_destructive = st.checkbox("I confirm these REDUCTIONS are intended", value=False)
                 else:
                     confirm_destructive = True
 
+                # Calculate disabled state
                 submit_disabled = not safety_lock or (destructive_warns and not confirm_destructive)
                 
-                if st.form_submit_button("APPLY PRODUCTION CHANGES", type="primary", disabled=submit_disabled):
-                    if payload:
-                        updated = api.update_quota_dynamic(quota.id, payload)
-                        keys = ", ".join(payload.keys())
-                        new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0)) if "limits" in payload else quota.hard_limit_gb
-                        write_audit_entry(state.admin_user, state.selected_cluster, f"UPDATE ({keys})", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
-                        st.success("Updated successfully.")
-                        state.quotas_loaded = False
-                        st.rerun()
+                # Status indicator
+                if submit_disabled:
+                    if not safety_lock:
+                        st.error("🔒 Safety lock disabled - enable in sidebar to apply changes")
+                    elif destructive_warns:
+                        st.warning("⚠️ Acknowledge reductions above to enable submit")
+                
+                # Submit button - prominent placement
+                col1, col2, col3 = st.columns([1, 2, 1])
+                with col2:
+                    submitted = st.form_submit_button(
+                        "💾 APPLY PRODUCTION CHANGES", 
+                        type="primary",
+                        disabled=submit_disabled
+                    )
+                
+                if submitted and payload:
+                    updated = api.update_quota_dynamic(quota.id, payload)
+                    keys = ", ".join(payload.keys())
+                    new_h = bytes_to_gb(updated.get("limits", {}).get("hard", 0)) if "limits" in payload else quota.hard_limit_gb
+                    write_audit_entry(state.admin_user, state.selected_cluster, f"UPDATE ({keys})", quota.path.split("/")[-1], quota.path, quota.hard_limit_gb, new_h)
+                    st.success("✅ Updated successfully!")
+                    state.quotas_loaded = False
+                    st.rerun()
             
             with st.expander("🗑️ Danger Zone"):
                 if not safety_lock:
