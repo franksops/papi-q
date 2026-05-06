@@ -143,7 +143,6 @@ DEFAULT_CONFIG_DIR = Path.home() / ".papi-q"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_CLUSTERS_FILE = DEFAULT_CONFIG_DIR / "clusters.json"
 DEFAULT_SYSTEM_LOG = DEFAULT_CONFIG_DIR / "system.log"
-DEFAULT_AUDIT_LOG = Path.home() / "isilon_admin_audit.csv"
 
 def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist."""
@@ -193,10 +192,7 @@ def log_warning(message: str):
 
 
 import json
-import os
-from pathlib import Path
-from typing import Dict, Any, Optional
-
+from typing import Dict, Any
 
 
 
@@ -222,7 +218,6 @@ def load_config() -> Dict[str, Any]:
                 log_info("Configuration loaded successfully")
         except json.JSONDecodeError as e:
             log_error("Corrupt config.json found, using defaults", e)
-            pass
     else:
         log_warning("config.json not found, using defaults")
     
@@ -257,12 +252,6 @@ def save_clusters(clusters: Dict[str, str]) -> None:
     ensure_config_dir()
     with open(DEFAULT_CLUSTERS_FILE, "w") as f:
         json.dump(clusters, f, indent=2)
-
-
-def get_cluster_url(cluster_name: str) -> Optional[str]:
-    """Get the API URL for a cluster by name."""
-    clusters = load_clusters()
-    return clusters.get(cluster_name)
 
 
 def add_cluster(name: str, url: str) -> bool:
@@ -448,16 +437,16 @@ class IsilonAPI:
             def find_component(name_patterns: List[str]):
                 """Search package submodules for a class matching patterns."""
                 # Check current sdk module first
-                for p in name_patterns:
-                    if hasattr(sdk, p): return getattr(sdk, p)
+                for pattern in name_patterns:
+                    if hasattr(sdk, pattern): return getattr(sdk, pattern)
                 
                 # Search common subpackage locations
                 subpkgs = ['models', 'api', 'rest']
                 for sub in subpkgs:
                     try:
                         m = importlib.import_module(f"{sdk.__name__}.{sub}")
-                        for p in name_patterns:
-                            if hasattr(m, p): return getattr(m, p)
+                        for pattern in name_patterns:
+                            if hasattr(m, pattern): return getattr(m, pattern)
                     except: continue
                 
                 # Last resort: Deep walk (only if not found yet)
@@ -465,8 +454,8 @@ class IsilonAPI:
                     if 'models' in mod_name or 'api' in mod_name:
                         try:
                             m = importlib.import_module(mod_name)
-                            for p in name_patterns:
-                                if hasattr(m, p): return getattr(m, p)
+                            for pattern in name_patterns:
+                                if hasattr(m, pattern): return getattr(m, pattern)
                         except: continue
                 return None
 
@@ -563,15 +552,24 @@ class IsilonAPI:
             all_attrs = [a for a in dir(q) if not a.startswith('_')]
             zone_attrs = [a for a in all_attrs if 'zone' in a.lower()]
             if zone_attrs:
+                quota_id = getattr(q, "id", "unknown")
                 for za in zone_attrs[:3]:  # Log first 3
                     val = getattr(q, za, None)
                     if val and val != "System":
-                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {q.id}")
+                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {quota_id}")
                         zone = val
                         break
+        
+        # Safely extract required attributes
+        quota_id = getattr(q, "id", None)
+        quota_path = getattr(q, "path", None)
+        
+        if not quota_id or not quota_path:
+            log_warning(f"Quota missing required attribute: id={quota_id}, path={quota_path}")
+            return None  # Skip this quota
                          
         return QuotaEntry(
-            id=q.id, path=q.path,
+            id=quota_id, path=quota_path,
             hard_limit_bytes=getattr(lims, "hard", 0) or 0,
             soft_limit_bytes=getattr(lims, "soft", 0) or 0,
             usage_bytes=usage_val,
@@ -591,6 +589,32 @@ class IsilonAPI:
         zones = self.list_access_zones()
         log_info(f"Getting all paths from {len(zones)} zones")
         
+        def process_shares(shares, zone):
+            """Process SMB shares and add to all_paths."""
+            for s in shares:
+                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
+                if path:
+                    if path not in all_paths:
+                        all_paths[path] = {"protocol": "", "zone": zone}
+                    current = all_paths[path]["protocol"]
+                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+        
+        def process_exports(exports, zone):
+            """Process NFS exports and add to all_paths."""
+            for e in exports:
+                # Handle both 'paths' attribute and potential nested structure
+                paths = getattr(e, "paths", []) or []
+                for p in paths:
+                    path = p.rstrip("/") if isinstance(p, str) else str(p).rstrip("/")
+                    if path:
+                        if path not in all_paths:
+                            all_paths[path] = {"protocol": "", "zone": zone}
+                        current = all_paths[path]["protocol"]
+                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+        
+        # Track if we got any results
+        any_results = False
+        
         for zone in zones:
             # SMB Shares - try both method names
             if self.shares_api:
@@ -601,17 +625,25 @@ class IsilonAPI:
                         try:
                             resp = method(zone=zone)
                             shares = getattr(resp, "shares", None) or resp
-                            for s in shares:
-                                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
-                                if path:
-                                    if path not in all_paths:
-                                        all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                    current = all_paths[path]["protocol"]
-                                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+                            if shares:
+                                process_shares(shares, zone)
+                                any_results = True
                             smb_success = True
-                            break  # Success, no need to try other method
+                            break
+                        except TypeError:
+                            # Zone parameter not supported, try without it
+                            try:
+                                resp = method()
+                                shares = getattr(resp, "shares", None) or resp
+                                if shares:
+                                    process_shares(shares, zone)
+                                    any_results = True
+                                smb_success = True
+                                break
+                            except Exception:
+                                continue
                         except Exception:
-                            continue  # Try next method name
+                            continue
                 if not smb_success:
                     log_warning(f"SMB listing failed for zone {zone}: no working method found")
             
@@ -624,21 +656,61 @@ class IsilonAPI:
                         try:
                             resp = method(zone=zone)
                             exports = getattr(resp, "exports", None) or resp
-                            for e in exports:
-                                paths = getattr(e, "paths", []) or []
-                                for p in paths:
-                                    path = p.rstrip("/")
-                                    if path:
-                                        if path not in all_paths:
-                                            all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                        current = all_paths[path]["protocol"]
-                                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+                            if exports:
+                                process_exports(exports, zone)
+                                any_results = True
                             nfs_success = True
-                            break  # Success, no need to try other method
+                            break
+                        except TypeError:
+                            # Zone parameter not supported, try without it
+                            try:
+                                resp = method()
+                                exports = getattr(resp, "exports", None) or resp
+                                if exports:
+                                    process_exports(exports, zone)
+                                    any_results = True
+                                nfs_success = True
+                                break
+                            except Exception:
+                                continue
                         except Exception:
-                            continue  # Try next method name
+                            continue
                 if not nfs_success:
                     log_warning(f"NFS listing failed for zone {zone}: no working method found")
+        
+        # If no results from any zone, try querying without zone filtering (some APIs return all zones when no zone is specified)
+        if not any_results and len(zones) <= 1:
+            log_info("No paths found with zone filtering, trying without zone parameter...")
+            
+            if self.shares_api:
+                for method_name in ["list_smb_shares", "list_smb_share"]:
+                    method = getattr(self.shares_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            shares = getattr(resp, "shares", None) or resp
+                            if shares:
+                                process_shares(shares, "System")
+                                log_info(f"Found {len(shares)} SMB shares without zone filter")
+                            break
+                        except Exception as e:
+                            log_warning(f"SMB listing without zone failed: {e}")
+                            continue
+            
+            if self.protocols_api:
+                for method_name in ["list_nfs_exports", "list_nfs_export"]:
+                    method = getattr(self.protocols_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            exports = getattr(resp, "exports", None) or resp
+                            if exports:
+                                process_exports(exports, "System")
+                                log_info(f"Found {len(exports)} NFS exports without zone filter")
+                            break
+                        except Exception as e:
+                            log_warning(f"NFS listing without zone failed: {e}")
+                            continue
         
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
@@ -679,7 +751,10 @@ class IsilonAPI:
             
             # Pass the requested zone to _map_quota_response so it can use it as fallback
             effective_zone = access_zone if zone_filtered else None
-            return [self._map_quota_response(q, default_zone=effective_zone) for q in resp.quotas], getattr(resp, "continue", None)
+            mapped_quotas = [self._map_quota_response(q, default_zone=effective_zone) for q in resp.quotas]
+            # Filter out None values (quotas that couldn't be mapped)
+            valid_quotas = [q for q in mapped_quotas if q is not None]
+            return valid_quotas, getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
@@ -788,109 +863,116 @@ class IsilonAPI:
         
         # 1. Try Zones API (Modern OneFS 8.x/9.x)
         if self.zones_api:
-            try:
-                # v9.x uses list_zones, get_zones, or list_access_zones
-                for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
-                    method = getattr(self.zones_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            # Response can be { "zones": [...] } or { "access_zones": [...] }
-                            # or direct list/array response
-                            zones = (getattr(resp, "zones", None) or 
-                                    getattr(resp, "access_zones", None) or
-                                    getattr(resp, "items", None) or
-                                    resp if isinstance(resp, (list, tuple)) else None)
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:  # Found real zones, no need for fallbacks
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Zones API discovery failed: {e}")
+            for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
+                method = getattr(self.zones_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        # Response can be { "zones": [...] } or { "access_zones": [...] }
+                        # or direct list/array response
+                        zones = (getattr(resp, "zones", None) or 
+                                getattr(resp, "access_zones", None) or
+                                getattr(resp, "items", None) or
+                                resp if isinstance(resp, (list, tuple)) else None)
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:  # Found real zones, no need for fallbacks
+                                break
+                    except Exception as e:
+                        log_warning(f"Zones API method {method_name} failed: {e}")
+                        continue
 
         # 2. Try Namespaces API (Legacy/Specific Versions)
         if self.namespaces_api:
-            try:
-                for method_name in ["get_access_zones", "list_access_zones", "get_zones", "list_zones"]:
-                    method = getattr(self.namespaces_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            zones = (getattr(resp, "access_zones", None) or 
-                                    getattr(resp, "zones", None) or
-                                    getattr(resp, "items", None) or
-                                    resp if isinstance(resp, (list, tuple)) else None)
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Namespaces zone discovery failed: {e}")
+            for method_name in ["get_access_zones", "list_access_zones", "get_zones", "list_zones"]:
+                method = getattr(self.namespaces_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        zones = (getattr(resp, "access_zones", None) or 
+                                getattr(resp, "zones", None) or
+                                getattr(resp, "items", None) or
+                                resp if isinstance(resp, (list, tuple)) else None)
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:
+                                break
+                    except Exception as e:
+                        log_warning(f"Namespaces API method {method_name} failed: {e}")
+                        continue
 
         # 3. Try Protocols API (often has access to zone list)
         if self.protocols_api:
-            try:
-                for method_name in ["list_access_zones", "get_access_zones", "list_zones", "get_zones"]:
-                    method = getattr(self.protocols_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            zones = (getattr(resp, "zones", []) or 
-                                    getattr(resp, "access_zones", []) or
-                                    getattr(resp, "items", []) or
-                                    resp if isinstance(resp, (list, tuple)) else [])
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Protocols zone discovery failed: {e}")
+            for method_name in ["list_access_zones", "get_access_zones", "list_zones", "get_zones"]:
+                method = getattr(self.protocols_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        zones = (getattr(resp, "zones", []) or 
+                                getattr(resp, "access_zones", []) or
+                                getattr(resp, "items", []) or
+                                resp if isinstance(resp, (list, tuple)) else [])
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:
+                                break
+                    except Exception as e:
+                        log_warning(f"Protocols API method {method_name} failed: {e}")
+                        continue
 
-        # 4. Try Quota API - extract zones from quota responses (ALWAYS run as supplement)
+        # 4. ALWAYS extract zones from quota API responses (with PAGINATION)
+        # This is critical because other APIs may fail, but quota API almost always works
         try:
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas", None)
             if method:
-                # Try without zone filter to see all zones
-                resp = method(limit=100)
-                if hasattr(resp, "quotas") and resp.quotas:
-                    # First pass: extract zones from quota zone attributes
-                    zone_names = set()
+                all_quota_zones = set()
+                token = None
+                iterations = 0
+                max_iterations = 50  # Safety limit
+                
+                # Paginate through ALL quotas to discover all zones
+                while iterations < max_iterations:
+                    iterations += 1
+                    try:
+                        if token:
+                            resp = method(limit=1000, **{'continue': token})
+                        else:
+                            resp = method(limit=1000)
+                    except TypeError:
+                        # Some APIs don't support 'continue' parameter
+                        resp = method(limit=1000)
+                    
+                    if not hasattr(resp, "quotas") or not resp.quotas:
+                        break
+                    
+                    # Extract zones from quota attributes
                     for q in resp.quotas:
                         zone = (getattr(q, "zone", None) or 
                                getattr(q, "access_zone", None) or
                                getattr(q, "zone_name", None))
                         if zone and zone != "System" and zone != "":
-                            zone_names.add(zone)
-                    
-                    # Second pass: extract potential zones from paths
-                    # e.g., /ifs/zone1/data -> zone1
-                    path_zones = set()
-                    for q in resp.quotas:
+                            all_quota_zones.add(zone)
+                        
+                        # Also try to infer zone from path structure
+                        # Only if quota has a zone attribute that looks like a real zone name
                         q_path = getattr(q, "path", "") or ""
-                        if q_path.startswith("/ifs/"):
-                            # Extract second path component as potential zone
-                            # /ifs/zone1/data -> zone1
-                            parts = q_path.strip("/").split("/")
-                            if len(parts) >= 2 and parts[0] == "ifs":
-                                potential_zone = parts[1]
-                                # Only add if it's not a common directory name
-                                # Being conservative - only exclude very common ones
-                                if potential_zone not in ["ifs", "data"]:
-                                    path_zones.add(potential_zone)
+                        if q_path.startswith("/ifs/") and zone and zone != "System":
+                            # Use the zone attribute value directly as the zone name
+                            all_quota_zones.add(zone)
                     
-                    # Merge discovered zones (only add if not already in data)
-                    all_discovered = zone_names | path_zones
-                    for z in all_discovered:
-                        if z and z != "System":
-                            # Use existing path if available, otherwise construct from zone name
-                            if z not in data:
-                                data[z] = f"/ifs/{z}"
+                    # Check for pagination
+                    token = getattr(resp, "continue", None)
+                    if not token:
+                        break
+                
+                # Merge discovered zones from quota data
+                for z in all_quota_zones:
+                    if z and z != "System" and z not in data:
+                        data[z] = f"/ifs/{z}"
+                        
+                if all_quota_zones:
+                    log_info(f"Discovered {len(all_quota_zones)} zones from quota data: {all_quota_zones}")
+                    
         except Exception as e:
             log_warning(f"Quota-based zone discovery failed: {e}")
 
@@ -930,8 +1012,8 @@ class IsilonAPI:
         
         # Try Quota API - get sample quotas
         try:
-            method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
-            resp = method(limit=5)
+            quota_method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
+            resp = quota_method(limit=5)
             if hasattr(resp, "quotas") and resp.quotas:
                 for q in list(resp.quotas)[:3]:
                     sample = {
@@ -940,7 +1022,7 @@ class IsilonAPI:
                         "zone_attr": getattr(q, "zone", "NOT_FOUND"),
                         "access_zone_attr": getattr(q, "access_zone", "NOT_FOUND"),
                         "zone_name_attr": getattr(q, "zone_name", "NOT_FOUND"),
-                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()[:200]}
+                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()}
                     }
                     debug_info["sample_quotas"].append(sample)
         except Exception as e:
@@ -1035,7 +1117,14 @@ class IsilonAPI:
         """Fetch ACL from Namespace API with explicit zone support."""
         if not self.namespaces_api: return {"error": "Namespace API not available"}
         try:
-            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
+            # Normalize path: ensure it starts with /ifs
+            if path.startswith('/ifs'):
+                ifs_path = path.rstrip('/') or '/ifs'
+            else:
+                path_clean = path.lstrip('/')
+                if path_clean.startswith('ifs'):
+                    path_clean = path_clean[3:].lstrip('/')
+                ifs_path = f'/ifs/{path_clean}' if path_clean else '/ifs'
             resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e: return {"error": str(e)}
@@ -1119,7 +1208,8 @@ def read_audit_log(cluster: str) -> List[Dict[str, Any]]:
                     row["old_limit_gb"] = float(row["old_limit_gb"]) if row.get("old_limit_gb") else 0.0
                     row["new_limit_gb"] = float(row["new_limit_gb"]) if row.get("new_limit_gb") else 0.0
                     results.append(row)
-        except Exception: continue
+        except Exception as e:
+            print(f"AUDIT READ ERROR: Failed to read {f_path}: {e}", flush=True)
         
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results
@@ -1212,7 +1302,7 @@ def init_session() -> None:
         "admin_user": None,
         "quotas": [],
         "quotas_loaded": False,
-        "selected_quota_paths": [],
+        "selected_quota_id": None,
         "confirm_shutdown": False,
     }
     for key, val in defaults.items():
@@ -1230,7 +1320,7 @@ def clear_api_client() -> None:
     st.session_state.admin_user = None
     st.session_state.quotas = []
     st.session_state.quotas_loaded = False
-    st.session_state.selected_quota_paths = []
+    st.session_state.selected_quota_id = None
 
 
 def handle_api_error(error: Exception) -> bool:
@@ -1436,6 +1526,7 @@ def sidebar_tools():
     
     if st.sidebar.button("🔄 Force Refresh Inventory", use_container_width=True):
         state.quotas_loaded = False
+        state.selected_quota_id = None
         st.rerun()
 
     if st.sidebar.button("🚪 Logout", use_container_width=True):
@@ -1501,10 +1592,6 @@ def monitoring_tab():
     if not state.quotas_loaded:
         with st.spinner("Fetching all shares, exports, and quotas..."):
             try:
-                # Get zones first
-                state.zones = api.list_access_zones()
-                log_info(f"Discovered access zones: {state.zones}")
-                
                 # Get ALL paths from SMB shares and NFS exports
                 all_paths = api.get_all_paths()
                 log_info(f"Found {len(all_paths)} paths from SMB/NFS")
@@ -1513,17 +1600,23 @@ def monitoring_tab():
                 quotas = api.list_all_quotas()
                 log_info(f"Found {len(quotas)} quotas")
                 
-                # Build quota lookup by path
+                # Build quota lookup by normalized path
                 quota_by_path = {}
                 for q in quotas:
-                    # Normalize path
-                    norm_path = q.path.rstrip("/")
+                    # Normalize path: remove trailing slashes, lowercase for comparison
+                    norm_path = q.path.rstrip("/").lower()
                     quota_by_path[norm_path] = q
+                
+                # Track which quota paths we've matched
+                matched_quota_paths = set()
                 
                 # Merge paths with quota info
                 state.all_paths_merged = []
                 for path, info in all_paths.items():
-                    quota = quota_by_path.get(path)
+                    norm_path = path.rstrip("/").lower()
+                    quota = quota_by_path.get(norm_path)
+                    if quota:
+                        matched_quota_paths.add(id(quota))
                     state.all_paths_merged.append({
                         "path": path,
                         "protocol": info["protocol"] or "-",
@@ -1535,6 +1628,22 @@ def monitoring_tab():
                         "usage_gb": quota.usage_gb if quota else 0,
                         "status": quota.status if quota else None,
                     })
+                
+                # Add quotas that don't have a corresponding SMB/NFS path
+                # These are quotas on paths that aren't shared
+                for q in quotas:
+                    if id(q) not in matched_quota_paths:
+                        state.all_paths_merged.append({
+                            "path": q.path,
+                            "protocol": "-",  # No share/export
+                            "zone": q.access_zone,
+                            "has_quota": True,
+                            "quota": q,
+                            "usage_percent": q.usage_percent,
+                            "hard_limit_gb": q.hard_limit_gb,
+                            "usage_gb": q.usage_gb,
+                            "status": q.status,
+                        })
                 
                 state.quotas = quotas  # Keep for modify_tab
                 state.quotas_loaded = True
@@ -1636,14 +1745,19 @@ def monitoring_tab():
             st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
             
             # Create selection options - only for paths with quotas
-            sel_options = [f"{p['path']} [{p['zone']}] ({p['usage_percent']:.1f}%)" for p in items if p["has_quota"]]
+            # Include quota ID for stable matching
+            # Include page number in key to prevent selection state leaking between pages
+            sel_key = f"sel_{key_suffix}_p{page}"
+            sel_options = {
+                f"{p['path']} [{p['zone']}] ({p['usage_percent']:.1f}%)": p['quota'].id
+                for p in items if p["has_quota"]
+            }
             if sel_options:
-                selected = st.multiselect("Select path with quota to manage", 
-                                            options=sel_options,
-                                            max_selections=1,
-                                            key=f"sel_{key_suffix}")
+                selected = st.selectbox("Select path with quota to manage", 
+                                            options=list(sel_options.keys()),
+                                            key=sel_key)
                 if selected:
-                    state.selected_quota_paths = selected
+                    state.selected_quota_id = sel_options[selected]
             elif items:
                 st.caption("💡 No quotas on this page. Select a path with ✅ to manage.")
         else:
@@ -1672,21 +1786,19 @@ def monitoring_tab():
 
 def modify_tab():
     st.header("Universal Manager 🛠️")
-    if not state.selected_quota_paths:
+    if not state.selected_quota_id:
         st.info("Select a quota from the Dashboard.")
         return
     
-    path_key = state.selected_quota_paths[0]
-    # Handle both old format: "path (usage%)" and new format: "path [zone] (usage%)"
+    # Find quota by ID
     quota = None
     for q in state.quotas:
-        option_new = f"{q.path} [{q.access_zone}] ({q.usage_percent:.1f}%)"
-        option_old = f"{q.path} ({q.usage_percent:.1f}%)"
-        if option_new == path_key or option_old == path_key:
+        if q.id == state.selected_quota_id:
             quota = q
             break
     if not quota: 
-        st.error(f"Could not find quota for selection: {path_key}")
+        st.error(f"Could not find quota with ID: {state.selected_quota_id}")
+        state.selected_quota_id = None  # Clear invalid selection
         return
 
     api = state.api_client
@@ -1778,11 +1890,21 @@ def provision_tab():
         
         btn_label = "CREATE QUOTA" if safety_lock else "CREATE QUOTA (LOCKED)"
         if st.form_submit_button(btn_label, type="primary", disabled=not safety_lock):
-            if not path.startswith("/ifs"): st.error("Invalid path"); return
+            # Normalize path: ensure it starts with /ifs
+            if not path:
+                st.error("Path is required")
+                return
+            if path.startswith('/ifs'):
+                normalized_path = path.rstrip('/') or '/ifs'
+            else:
+                path_clean = path.lstrip('/')
+                if path_clean.startswith('ifs'):
+                    path_clean = path_clean[3:].lstrip('/')
+                normalized_path = f'/ifs/{path_clean}' if path_clean else '/ifs'
             try:
-                api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
-                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, h)
-                st.success(f"Quota created on {path}")
+                api.create_quota(normalized_path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
+                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", normalized_path.split("/")[-1], normalized_path, 0, h)
+                st.success(f"Quota created on {normalized_path}")
                 state.quotas_loaded = False
             except Exception as e:
                 if not handle_api_error(e): st.error(e)
@@ -1801,36 +1923,36 @@ def audit_tab():
 
 def export_tab():
     st.header("Reporting")
-    if st.button("Generate Full CSV Report"):
-        with st.spinner("Processing large dataset..."):
-            try:
-                # Use already-loaded data if available, otherwise fetch
-                if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
-                    # Export all paths with quota info
-                    rows = []
-                    for p in state.all_paths_merged:
-                        row = {
-                            "path": p["path"],
-                            "zone": p["zone"],
-                            "protocol": p["protocol"],
-                            "has_quota": "Yes" if p["has_quota"] else "No",
-                        }
-                        if p["has_quota"]:
-                            row.update({
-                                "hard_limit_gb": p["quota"].hard_limit_gb,
-                                "soft_limit_gb": p["quota"].soft_limit_gb,
-                                "usage_gb": p["quota"].usage_gb,
-                                "usage_percent": round(p["usage_percent"], 1),
-                                "status": p["status"].value if p["status"] else "N/A",
-                            })
-                        rows.append(row)
-                    st.download_button("Download Report", pd.DataFrame(rows).to_csv(index=False), "quota_report.csv")
-                else:
-                    # Fallback: just export quotas
-                    qs = state.api_client.list_all_quotas()
-                    data = [q.to_dict() for q in qs]
-                    st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
-            except Exception as e: st.error(e)
+    try:
+        # Use already-loaded data if available, otherwise fetch
+        if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
+            rows = []
+            for p in state.all_paths_merged:
+                row = {
+                    "path": p["path"],
+                    "zone": p["zone"],
+                    "protocol": p["protocol"],
+                    "has_quota": "Yes" if p["has_quota"] else "No",
+                }
+                if p["has_quota"]:
+                    row.update({
+                        "hard_limit_gb": p["quota"].hard_limit_gb,
+                        "soft_limit_gb": p["quota"].soft_limit_gb,
+                        "usage_gb": p["quota"].usage_gb,
+                        "usage_percent": round(p["usage_percent"], 1),
+                        "status": p["status"].value if p["status"] else "N/A",
+                    })
+                rows.append(row)
+            csv_data = pd.DataFrame(rows).to_csv(index=False)
+        else:
+            # Fallback: just export quotas
+            with st.spinner("Fetching quotas..."):
+                qs = state.api_client.list_all_quotas()
+            csv_data = pd.DataFrame([q.to_dict() for q in qs]).to_csv(index=False)
+        
+        st.download_button("📥 Download CSV Report", csv_data, "quota_report.csv")
+    except Exception as e:
+        st.error(f"Export failed: {e}")
 
 
 def debug_zones_tab():

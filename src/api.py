@@ -162,16 +162,16 @@ class IsilonAPI:
             def find_component(name_patterns: List[str]):
                 """Search package submodules for a class matching patterns."""
                 # Check current sdk module first
-                for p in name_patterns:
-                    if hasattr(sdk, p): return getattr(sdk, p)
+                for pattern in name_patterns:
+                    if hasattr(sdk, pattern): return getattr(sdk, pattern)
                 
                 # Search common subpackage locations
                 subpkgs = ['models', 'api', 'rest']
                 for sub in subpkgs:
                     try:
                         m = importlib.import_module(f"{sdk.__name__}.{sub}")
-                        for p in name_patterns:
-                            if hasattr(m, p): return getattr(m, p)
+                        for pattern in name_patterns:
+                            if hasattr(m, pattern): return getattr(m, pattern)
                     except: continue
                 
                 # Last resort: Deep walk (only if not found yet)
@@ -179,8 +179,8 @@ class IsilonAPI:
                     if 'models' in mod_name or 'api' in mod_name:
                         try:
                             m = importlib.import_module(mod_name)
-                            for p in name_patterns:
-                                if hasattr(m, p): return getattr(m, p)
+                            for pattern in name_patterns:
+                                if hasattr(m, pattern): return getattr(m, pattern)
                         except: continue
                 return None
 
@@ -277,15 +277,24 @@ class IsilonAPI:
             all_attrs = [a for a in dir(q) if not a.startswith('_')]
             zone_attrs = [a for a in all_attrs if 'zone' in a.lower()]
             if zone_attrs:
+                quota_id = getattr(q, "id", "unknown")
                 for za in zone_attrs[:3]:  # Log first 3
                     val = getattr(q, za, None)
                     if val and val != "System":
-                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {q.id}")
+                        log_info(f"Found zone attribute '{za}' = '{val}' on quota {quota_id}")
                         zone = val
                         break
+        
+        # Safely extract required attributes
+        quota_id = getattr(q, "id", None)
+        quota_path = getattr(q, "path", None)
+        
+        if not quota_id or not quota_path:
+            log_warning(f"Quota missing required attribute: id={quota_id}, path={quota_path}")
+            return None  # Skip this quota
                          
         return QuotaEntry(
-            id=q.id, path=q.path,
+            id=quota_id, path=quota_path,
             hard_limit_bytes=getattr(lims, "hard", 0) or 0,
             soft_limit_bytes=getattr(lims, "soft", 0) or 0,
             usage_bytes=usage_val,
@@ -305,6 +314,32 @@ class IsilonAPI:
         zones = self.list_access_zones()
         log_info(f"Getting all paths from {len(zones)} zones")
         
+        def process_shares(shares, zone):
+            """Process SMB shares and add to all_paths."""
+            for s in shares:
+                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
+                if path:
+                    if path not in all_paths:
+                        all_paths[path] = {"protocol": "", "zone": zone}
+                    current = all_paths[path]["protocol"]
+                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+        
+        def process_exports(exports, zone):
+            """Process NFS exports and add to all_paths."""
+            for e in exports:
+                # Handle both 'paths' attribute and potential nested structure
+                paths = getattr(e, "paths", []) or []
+                for p in paths:
+                    path = p.rstrip("/") if isinstance(p, str) else str(p).rstrip("/")
+                    if path:
+                        if path not in all_paths:
+                            all_paths[path] = {"protocol": "", "zone": zone}
+                        current = all_paths[path]["protocol"]
+                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+        
+        # Track if we got any results
+        any_results = False
+        
         for zone in zones:
             # SMB Shares - try both method names
             if self.shares_api:
@@ -315,17 +350,25 @@ class IsilonAPI:
                         try:
                             resp = method(zone=zone)
                             shares = getattr(resp, "shares", None) or resp
-                            for s in shares:
-                                path = (getattr(s, "path", None) or getattr(s, "name", "") or "").rstrip("/")
-                                if path:
-                                    if path not in all_paths:
-                                        all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                    current = all_paths[path]["protocol"]
-                                    all_paths[path]["protocol"] = "SMB" if not current else f"{current}, SMB"
+                            if shares:
+                                process_shares(shares, zone)
+                                any_results = True
                             smb_success = True
-                            break  # Success, no need to try other method
+                            break
+                        except TypeError:
+                            # Zone parameter not supported, try without it
+                            try:
+                                resp = method()
+                                shares = getattr(resp, "shares", None) or resp
+                                if shares:
+                                    process_shares(shares, zone)
+                                    any_results = True
+                                smb_success = True
+                                break
+                            except Exception:
+                                continue
                         except Exception:
-                            continue  # Try next method name
+                            continue
                 if not smb_success:
                     log_warning(f"SMB listing failed for zone {zone}: no working method found")
             
@@ -338,21 +381,61 @@ class IsilonAPI:
                         try:
                             resp = method(zone=zone)
                             exports = getattr(resp, "exports", None) or resp
-                            for e in exports:
-                                paths = getattr(e, "paths", []) or []
-                                for p in paths:
-                                    path = p.rstrip("/")
-                                    if path:
-                                        if path not in all_paths:
-                                            all_paths[path] = {"protocol": "", "zone": zone, "quota": None, "quota_id": None}
-                                        current = all_paths[path]["protocol"]
-                                        all_paths[path]["protocol"] = "NFS" if not current else f"{current}, NFS"
+                            if exports:
+                                process_exports(exports, zone)
+                                any_results = True
                             nfs_success = True
-                            break  # Success, no need to try other method
+                            break
+                        except TypeError:
+                            # Zone parameter not supported, try without it
+                            try:
+                                resp = method()
+                                exports = getattr(resp, "exports", None) or resp
+                                if exports:
+                                    process_exports(exports, zone)
+                                    any_results = True
+                                nfs_success = True
+                                break
+                            except Exception:
+                                continue
                         except Exception:
-                            continue  # Try next method name
+                            continue
                 if not nfs_success:
                     log_warning(f"NFS listing failed for zone {zone}: no working method found")
+        
+        # If no results from any zone, try querying without zone filtering (some APIs return all zones when no zone is specified)
+        if not any_results and len(zones) <= 1:
+            log_info("No paths found with zone filtering, trying without zone parameter...")
+            
+            if self.shares_api:
+                for method_name in ["list_smb_shares", "list_smb_share"]:
+                    method = getattr(self.shares_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            shares = getattr(resp, "shares", None) or resp
+                            if shares:
+                                process_shares(shares, "System")
+                                log_info(f"Found {len(shares)} SMB shares without zone filter")
+                            break
+                        except Exception as e:
+                            log_warning(f"SMB listing without zone failed: {e}")
+                            continue
+            
+            if self.protocols_api:
+                for method_name in ["list_nfs_exports", "list_nfs_export"]:
+                    method = getattr(self.protocols_api, method_name, None)
+                    if method:
+                        try:
+                            resp = method()
+                            exports = getattr(resp, "exports", None) or resp
+                            if exports:
+                                process_exports(exports, "System")
+                                log_info(f"Found {len(exports)} NFS exports without zone filter")
+                            break
+                        except Exception as e:
+                            log_warning(f"NFS listing without zone failed: {e}")
+                            continue
         
         log_info(f"Found {len(all_paths)} unique paths across all zones")
         return all_paths
@@ -393,7 +476,10 @@ class IsilonAPI:
             
             # Pass the requested zone to _map_quota_response so it can use it as fallback
             effective_zone = access_zone if zone_filtered else None
-            return [self._map_quota_response(q, default_zone=effective_zone) for q in resp.quotas], getattr(resp, "continue", None)
+            mapped_quotas = [self._map_quota_response(q, default_zone=effective_zone) for q in resp.quotas]
+            # Filter out None values (quotas that couldn't be mapped)
+            valid_quotas = [q for q in mapped_quotas if q is not None]
+            return valid_quotas, getattr(resp, "continue", None)
         except Exception as e:
             raise RuntimeError(f"API Error: {e}")
 
@@ -502,109 +588,116 @@ class IsilonAPI:
         
         # 1. Try Zones API (Modern OneFS 8.x/9.x)
         if self.zones_api:
-            try:
-                # v9.x uses list_zones, get_zones, or list_access_zones
-                for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
-                    method = getattr(self.zones_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            # Response can be { "zones": [...] } or { "access_zones": [...] }
-                            # or direct list/array response
-                            zones = (getattr(resp, "zones", None) or 
-                                    getattr(resp, "access_zones", None) or
-                                    getattr(resp, "items", None) or
-                                    resp if isinstance(resp, (list, tuple)) else None)
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:  # Found real zones, no need for fallbacks
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Zones API discovery failed: {e}")
+            for method_name in ["list_zones", "get_zones", "list_access_zones", "get_access_zones"]:
+                method = getattr(self.zones_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        # Response can be { "zones": [...] } or { "access_zones": [...] }
+                        # or direct list/array response
+                        zones = (getattr(resp, "zones", None) or 
+                                getattr(resp, "access_zones", None) or
+                                getattr(resp, "items", None) or
+                                resp if isinstance(resp, (list, tuple)) else None)
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:  # Found real zones, no need for fallbacks
+                                break
+                    except Exception as e:
+                        log_warning(f"Zones API method {method_name} failed: {e}")
+                        continue
 
         # 2. Try Namespaces API (Legacy/Specific Versions)
         if self.namespaces_api:
-            try:
-                for method_name in ["get_access_zones", "list_access_zones", "get_zones", "list_zones"]:
-                    method = getattr(self.namespaces_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            zones = (getattr(resp, "access_zones", None) or 
-                                    getattr(resp, "zones", None) or
-                                    getattr(resp, "items", None) or
-                                    resp if isinstance(resp, (list, tuple)) else None)
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Namespaces zone discovery failed: {e}")
+            for method_name in ["get_access_zones", "list_access_zones", "get_zones", "list_zones"]:
+                method = getattr(self.namespaces_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        zones = (getattr(resp, "access_zones", None) or 
+                                getattr(resp, "zones", None) or
+                                getattr(resp, "items", None) or
+                                resp if isinstance(resp, (list, tuple)) else None)
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:
+                                break
+                    except Exception as e:
+                        log_warning(f"Namespaces API method {method_name} failed: {e}")
+                        continue
 
         # 3. Try Protocols API (often has access to zone list)
         if self.protocols_api:
-            try:
-                for method_name in ["list_access_zones", "get_access_zones", "list_zones", "get_zones"]:
-                    method = getattr(self.protocols_api, method_name, None)
-                    if method:
-                        try:
-                            resp = method()
-                            zones = (getattr(resp, "zones", []) or 
-                                    getattr(resp, "access_zones", []) or
-                                    getattr(resp, "items", []) or
-                                    resp if isinstance(resp, (list, tuple)) else [])
-                            if zones:
-                                merge_zones(zones)
-                                if len(data) > 1:
-                                    break
-                        except Exception:
-                            continue
-            except Exception as e:
-                log_warning(f"Protocols zone discovery failed: {e}")
+            for method_name in ["list_access_zones", "get_access_zones", "list_zones", "get_zones"]:
+                method = getattr(self.protocols_api, method_name, None)
+                if method:
+                    try:
+                        resp = method()
+                        zones = (getattr(resp, "zones", []) or 
+                                getattr(resp, "access_zones", []) or
+                                getattr(resp, "items", []) or
+                                resp if isinstance(resp, (list, tuple)) else [])
+                        if zones:
+                            merge_zones(zones)
+                            if len(data) > 1:
+                                break
+                    except Exception as e:
+                        log_warning(f"Protocols API method {method_name} failed: {e}")
+                        continue
 
-        # 4. Try Quota API - extract zones from quota responses (ALWAYS run as supplement)
+        # 4. ALWAYS extract zones from quota API responses (with PAGINATION)
+        # This is critical because other APIs may fail, but quota API almost always works
         try:
             method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas", None)
             if method:
-                # Try without zone filter to see all zones
-                resp = method(limit=100)
-                if hasattr(resp, "quotas") and resp.quotas:
-                    # First pass: extract zones from quota zone attributes
-                    zone_names = set()
+                all_quota_zones = set()
+                token = None
+                iterations = 0
+                max_iterations = 50  # Safety limit
+                
+                # Paginate through ALL quotas to discover all zones
+                while iterations < max_iterations:
+                    iterations += 1
+                    try:
+                        if token:
+                            resp = method(limit=1000, **{'continue': token})
+                        else:
+                            resp = method(limit=1000)
+                    except TypeError:
+                        # Some APIs don't support 'continue' parameter
+                        resp = method(limit=1000)
+                    
+                    if not hasattr(resp, "quotas") or not resp.quotas:
+                        break
+                    
+                    # Extract zones from quota attributes
                     for q in resp.quotas:
                         zone = (getattr(q, "zone", None) or 
                                getattr(q, "access_zone", None) or
                                getattr(q, "zone_name", None))
                         if zone and zone != "System" and zone != "":
-                            zone_names.add(zone)
-                    
-                    # Second pass: extract potential zones from paths
-                    # e.g., /ifs/zone1/data -> zone1
-                    path_zones = set()
-                    for q in resp.quotas:
+                            all_quota_zones.add(zone)
+                        
+                        # Also try to infer zone from path structure
+                        # Only if quota has a zone attribute that looks like a real zone name
                         q_path = getattr(q, "path", "") or ""
-                        if q_path.startswith("/ifs/"):
-                            # Extract second path component as potential zone
-                            # /ifs/zone1/data -> zone1
-                            parts = q_path.strip("/").split("/")
-                            if len(parts) >= 2 and parts[0] == "ifs":
-                                potential_zone = parts[1]
-                                # Only add if it's not a common directory name
-                                # Being conservative - only exclude very common ones
-                                if potential_zone not in ["ifs", "data"]:
-                                    path_zones.add(potential_zone)
+                        if q_path.startswith("/ifs/") and zone and zone != "System":
+                            # Use the zone attribute value directly as the zone name
+                            all_quota_zones.add(zone)
                     
-                    # Merge discovered zones (only add if not already in data)
-                    all_discovered = zone_names | path_zones
-                    for z in all_discovered:
-                        if z and z != "System":
-                            # Use existing path if available, otherwise construct from zone name
-                            if z not in data:
-                                data[z] = f"/ifs/{z}"
+                    # Check for pagination
+                    token = getattr(resp, "continue", None)
+                    if not token:
+                        break
+                
+                # Merge discovered zones from quota data
+                for z in all_quota_zones:
+                    if z and z != "System" and z not in data:
+                        data[z] = f"/ifs/{z}"
+                        
+                if all_quota_zones:
+                    log_info(f"Discovered {len(all_quota_zones)} zones from quota data: {all_quota_zones}")
+                    
         except Exception as e:
             log_warning(f"Quota-based zone discovery failed: {e}")
 
@@ -644,8 +737,8 @@ class IsilonAPI:
         
         # Try Quota API - get sample quotas
         try:
-            method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
-            resp = method(limit=5)
+            quota_method = getattr(self.quota_api, "list_quota_quotas", None) or getattr(self.quota_api, "list_quotas")
+            resp = quota_method(limit=5)
             if hasattr(resp, "quotas") and resp.quotas:
                 for q in list(resp.quotas)[:3]:
                     sample = {
@@ -654,7 +747,7 @@ class IsilonAPI:
                         "zone_attr": getattr(q, "zone", "NOT_FOUND"),
                         "access_zone_attr": getattr(q, "access_zone", "NOT_FOUND"),
                         "zone_name_attr": getattr(q, "zone_name", "NOT_FOUND"),
-                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()[:200]}
+                        "raw_attrs": {a: str(getattr(q, a, "N/A"))[:100] for a in dir(q) if not a.startswith('_') and 'zone' in a.lower()}
                     }
                     debug_info["sample_quotas"].append(sample)
         except Exception as e:
@@ -749,7 +842,14 @@ class IsilonAPI:
         """Fetch ACL from Namespace API with explicit zone support."""
         if not self.namespaces_api: return {"error": "Namespace API not available"}
         try:
-            ifs_path = path if path.startswith("/ifs") else f"/ifs/{path.lstrip('/')}"
+            # Normalize path: ensure it starts with /ifs
+            if path.startswith('/ifs'):
+                ifs_path = path.rstrip('/') or '/ifs'
+            else:
+                path_clean = path.lstrip('/')
+                if path_clean.startswith('ifs'):
+                    path_clean = path_clean[3:].lstrip('/')
+                ifs_path = f'/ifs/{path_clean}' if path_clean else '/ifs'
             resp = self.namespaces_api.get_acl(ifs_path, zone=zone)
             return resp.to_dict() if hasattr(resp, "to_dict") else {}
         except Exception as e: return {"error": str(e)}

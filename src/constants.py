@@ -7,7 +7,6 @@ DEFAULT_CONFIG_DIR = Path.home() / ".papi-q"
 DEFAULT_CONFIG_FILE = DEFAULT_CONFIG_DIR / "config.json"
 DEFAULT_CLUSTERS_FILE = DEFAULT_CONFIG_DIR / "clusters.json"
 DEFAULT_SYSTEM_LOG = DEFAULT_CONFIG_DIR / "system.log"
-DEFAULT_AUDIT_LOG = Path.home() / "isilon_admin_audit.csv"
 
 def ensure_config_dir() -> Path:
     """Create the config directory if it doesn't exist."""

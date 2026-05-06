@@ -81,6 +81,7 @@ def sidebar_tools():
     
     if st.sidebar.button("🔄 Force Refresh Inventory", use_container_width=True):
         state.quotas_loaded = False
+        state.selected_quota_id = None
         st.rerun()
 
     if st.sidebar.button("🚪 Logout", use_container_width=True):
@@ -146,10 +147,6 @@ def monitoring_tab():
     if not state.quotas_loaded:
         with st.spinner("Fetching all shares, exports, and quotas..."):
             try:
-                # Get zones first
-                state.zones = api.list_access_zones()
-                log_info(f"Discovered access zones: {state.zones}")
-                
                 # Get ALL paths from SMB shares and NFS exports
                 all_paths = api.get_all_paths()
                 log_info(f"Found {len(all_paths)} paths from SMB/NFS")
@@ -158,17 +155,23 @@ def monitoring_tab():
                 quotas = api.list_all_quotas()
                 log_info(f"Found {len(quotas)} quotas")
                 
-                # Build quota lookup by path
+                # Build quota lookup by normalized path
                 quota_by_path = {}
                 for q in quotas:
-                    # Normalize path
-                    norm_path = q.path.rstrip("/")
+                    # Normalize path: remove trailing slashes, lowercase for comparison
+                    norm_path = q.path.rstrip("/").lower()
                     quota_by_path[norm_path] = q
+                
+                # Track which quota paths we've matched
+                matched_quota_paths = set()
                 
                 # Merge paths with quota info
                 state.all_paths_merged = []
                 for path, info in all_paths.items():
-                    quota = quota_by_path.get(path)
+                    norm_path = path.rstrip("/").lower()
+                    quota = quota_by_path.get(norm_path)
+                    if quota:
+                        matched_quota_paths.add(id(quota))
                     state.all_paths_merged.append({
                         "path": path,
                         "protocol": info["protocol"] or "-",
@@ -180,6 +183,22 @@ def monitoring_tab():
                         "usage_gb": quota.usage_gb if quota else 0,
                         "status": quota.status if quota else None,
                     })
+                
+                # Add quotas that don't have a corresponding SMB/NFS path
+                # These are quotas on paths that aren't shared
+                for q in quotas:
+                    if id(q) not in matched_quota_paths:
+                        state.all_paths_merged.append({
+                            "path": q.path,
+                            "protocol": "-",  # No share/export
+                            "zone": q.access_zone,
+                            "has_quota": True,
+                            "quota": q,
+                            "usage_percent": q.usage_percent,
+                            "hard_limit_gb": q.hard_limit_gb,
+                            "usage_gb": q.usage_gb,
+                            "status": q.status,
+                        })
                 
                 state.quotas = quotas  # Keep for modify_tab
                 state.quotas_loaded = True
@@ -281,14 +300,19 @@ def monitoring_tab():
             st.dataframe(pd.DataFrame(df_data), use_container_width=True, hide_index=True)
             
             # Create selection options - only for paths with quotas
-            sel_options = [f"{p['path']} [{p['zone']}] ({p['usage_percent']:.1f}%)" for p in items if p["has_quota"]]
+            # Include quota ID for stable matching
+            # Include page number in key to prevent selection state leaking between pages
+            sel_key = f"sel_{key_suffix}_p{page}"
+            sel_options = {
+                f"{p['path']} [{p['zone']}] ({p['usage_percent']:.1f}%)": p['quota'].id
+                for p in items if p["has_quota"]
+            }
             if sel_options:
-                selected = st.multiselect("Select path with quota to manage", 
-                                            options=sel_options,
-                                            max_selections=1,
-                                            key=f"sel_{key_suffix}")
+                selected = st.selectbox("Select path with quota to manage", 
+                                            options=list(sel_options.keys()),
+                                            key=sel_key)
                 if selected:
-                    state.selected_quota_paths = selected
+                    state.selected_quota_id = sel_options[selected]
             elif items:
                 st.caption("💡 No quotas on this page. Select a path with ✅ to manage.")
         else:
@@ -317,21 +341,19 @@ def monitoring_tab():
 
 def modify_tab():
     st.header("Universal Manager 🛠️")
-    if not state.selected_quota_paths:
+    if not state.selected_quota_id:
         st.info("Select a quota from the Dashboard.")
         return
     
-    path_key = state.selected_quota_paths[0]
-    # Handle both old format: "path (usage%)" and new format: "path [zone] (usage%)"
+    # Find quota by ID
     quota = None
     for q in state.quotas:
-        option_new = f"{q.path} [{q.access_zone}] ({q.usage_percent:.1f}%)"
-        option_old = f"{q.path} ({q.usage_percent:.1f}%)"
-        if option_new == path_key or option_old == path_key:
+        if q.id == state.selected_quota_id:
             quota = q
             break
     if not quota: 
-        st.error(f"Could not find quota for selection: {path_key}")
+        st.error(f"Could not find quota with ID: {state.selected_quota_id}")
+        state.selected_quota_id = None  # Clear invalid selection
         return
 
     api = state.api_client
@@ -423,11 +445,21 @@ def provision_tab():
         
         btn_label = "CREATE QUOTA" if safety_lock else "CREATE QUOTA (LOCKED)"
         if st.form_submit_button(btn_label, type="primary", disabled=not safety_lock):
-            if not path.startswith("/ifs"): st.error("Invalid path"); return
+            # Normalize path: ensure it starts with /ifs
+            if not path:
+                st.error("Path is required")
+                return
+            if path.startswith('/ifs'):
+                normalized_path = path.rstrip('/') or '/ifs'
+            else:
+                path_clean = path.lstrip('/')
+                if path_clean.startswith('ifs'):
+                    path_clean = path_clean[3:].lstrip('/')
+                normalized_path = f'/ifs/{path_clean}' if path_clean else '/ifs'
             try:
-                api.create_quota(path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
-                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", path.split("/")[-1], path, 0, h)
-                st.success(f"Quota created on {path}")
+                api.create_quota(normalized_path, q_type, {"hard": h, "soft": s, "advisory": a}, zone, enforced, snapshots)
+                write_audit_entry(state.admin_user, state.selected_cluster, "CREATE", normalized_path.split("/")[-1], normalized_path, 0, h)
+                st.success(f"Quota created on {normalized_path}")
                 state.quotas_loaded = False
             except Exception as e:
                 if not handle_api_error(e): st.error(e)
@@ -446,36 +478,36 @@ def audit_tab():
 
 def export_tab():
     st.header("Reporting")
-    if st.button("Generate Full CSV Report"):
-        with st.spinner("Processing large dataset..."):
-            try:
-                # Use already-loaded data if available, otherwise fetch
-                if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
-                    # Export all paths with quota info
-                    rows = []
-                    for p in state.all_paths_merged:
-                        row = {
-                            "path": p["path"],
-                            "zone": p["zone"],
-                            "protocol": p["protocol"],
-                            "has_quota": "Yes" if p["has_quota"] else "No",
-                        }
-                        if p["has_quota"]:
-                            row.update({
-                                "hard_limit_gb": p["quota"].hard_limit_gb,
-                                "soft_limit_gb": p["quota"].soft_limit_gb,
-                                "usage_gb": p["quota"].usage_gb,
-                                "usage_percent": round(p["usage_percent"], 1),
-                                "status": p["status"].value if p["status"] else "N/A",
-                            })
-                        rows.append(row)
-                    st.download_button("Download Report", pd.DataFrame(rows).to_csv(index=False), "quota_report.csv")
-                else:
-                    # Fallback: just export quotas
-                    qs = state.api_client.list_all_quotas()
-                    data = [q.to_dict() for q in qs]
-                    st.download_button("Download Report", pd.DataFrame(data).to_csv(index=False), "quota_report.csv")
-            except Exception as e: st.error(e)
+    try:
+        # Use already-loaded data if available, otherwise fetch
+        if state.quotas_loaded and hasattr(state, 'all_paths_merged'):
+            rows = []
+            for p in state.all_paths_merged:
+                row = {
+                    "path": p["path"],
+                    "zone": p["zone"],
+                    "protocol": p["protocol"],
+                    "has_quota": "Yes" if p["has_quota"] else "No",
+                }
+                if p["has_quota"]:
+                    row.update({
+                        "hard_limit_gb": p["quota"].hard_limit_gb,
+                        "soft_limit_gb": p["quota"].soft_limit_gb,
+                        "usage_gb": p["quota"].usage_gb,
+                        "usage_percent": round(p["usage_percent"], 1),
+                        "status": p["status"].value if p["status"] else "N/A",
+                    })
+                rows.append(row)
+            csv_data = pd.DataFrame(rows).to_csv(index=False)
+        else:
+            # Fallback: just export quotas
+            with st.spinner("Fetching quotas..."):
+                qs = state.api_client.list_all_quotas()
+            csv_data = pd.DataFrame([q.to_dict() for q in qs]).to_csv(index=False)
+        
+        st.download_button("📥 Download CSV Report", csv_data, "quota_report.csv")
+    except Exception as e:
+        st.error(f"Export failed: {e}")
 
 
 def debug_zones_tab():

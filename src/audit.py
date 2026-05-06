@@ -75,7 +75,8 @@ def read_audit_log(cluster: str) -> List[Dict[str, Any]]:
                     row["old_limit_gb"] = float(row["old_limit_gb"]) if row.get("old_limit_gb") else 0.0
                     row["new_limit_gb"] = float(row["new_limit_gb"]) if row.get("new_limit_gb") else 0.0
                     results.append(row)
-        except Exception: continue
+        except Exception as e:
+            print(f"AUDIT READ ERROR: Failed to read {f_path}: {e}", flush=True)
         
     results.sort(key=lambda x: x["timestamp"], reverse=True)
     return results

@@ -1,11 +1,8 @@
 """Configuration management for SmartQuota Manager."""
 
 import json
-import os
-from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from src.logger import log_info, log_error, log_warning
-
 
 from src.constants import DEFAULT_CONFIG_DIR, DEFAULT_CONFIG_FILE, DEFAULT_CLUSTERS_FILE, ensure_config_dir
 
@@ -30,7 +27,6 @@ def load_config() -> Dict[str, Any]:
                 log_info("Configuration loaded successfully")
         except json.JSONDecodeError as e:
             log_error("Corrupt config.json found, using defaults", e)
-            pass
     else:
         log_warning("config.json not found, using defaults")
     
@@ -65,12 +61,6 @@ def save_clusters(clusters: Dict[str, str]) -> None:
     ensure_config_dir()
     with open(DEFAULT_CLUSTERS_FILE, "w") as f:
         json.dump(clusters, f, indent=2)
-
-
-def get_cluster_url(cluster_name: str) -> Optional[str]:
-    """Get the API URL for a cluster by name."""
-    clusters = load_clusters()
-    return clusters.get(cluster_name)
 
 
 def add_cluster(name: str, url: str) -> bool:

@@ -2,7 +2,7 @@
 
 import streamlit as st
 from typing import Any
-from src.logger import log_info, log_error
+from src.logger import log_info
 
 
 def init_session() -> None:
@@ -17,7 +17,7 @@ def init_session() -> None:
         "admin_user": None,
         "quotas": [],
         "quotas_loaded": False,
-        "selected_quota_paths": [],
+        "selected_quota_id": None,
         "confirm_shutdown": False,
     }
     for key, val in defaults.items():
@@ -35,7 +35,7 @@ def clear_api_client() -> None:
     st.session_state.admin_user = None
     st.session_state.quotas = []
     st.session_state.quotas_loaded = False
-    st.session_state.selected_quota_paths = []
+    st.session_state.selected_quota_id = None
 
 
 def handle_api_error(error: Exception) -> bool:
